@@ -41,6 +41,7 @@ jobs:
         run: python 主程序.py --selfcheck
         env:
           CI: 'true'
+          PYTHONIOENCODING: 'utf-8'
 
       - name: Nuitka 编译
         run: |
