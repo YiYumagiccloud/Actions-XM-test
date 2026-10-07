@@ -46,6 +46,27 @@ jobs:
       - name: 查看 Nuitka 版本
         run: python -m nuitka --version
 
+      - name: 缓存 Nuitka 下载目录
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\Nuitka\Nuitka\Cache\downloads
+          key: nuitka-downloads-${{ runner.os }}-v1
+
+      - name: 预下载 depends.exe
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dest = "$env:LOCALAPPDATA\Nuitka\Nuitka\Cache\downloads\depends\x86_64"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          try {
+            Invoke-WebRequest -Uri "https://dependencywalker.com/depends22_x64.zip" `
+              -OutFile "$env:TEMP\depends.zip" -TimeoutSec 120
+            Expand-Archive "$env:TEMP\depends.zip" -DestinationPath $dest -Force
+            Write-Host "depends.exe 预下载成功"
+          } catch {
+            Write-Host "预下载失败（Nuitka 会自己试）：$_"
+          }
+
       - name: Nuitka 编译
         run: |
           python -m nuitka `
