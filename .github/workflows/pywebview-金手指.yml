@@ -1,0 +1,71 @@
+name: 打包 · 金手指格式转换器
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '金手指-v*'          # 打 tag 触发，前缀区分项目
+    paths:
+      - 'Pywebview/金手指格式转换器/**'   # 只有这个目录变了才自动跑
+
+# 让下面所有 run 步骤默认在这个目录里执行
+defaults:
+  run:
+    working-directory: Pywebview/金手指格式转换器
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x64'
+          cache: 'pip'
+          cache-dependency-path: Pywebview/金手指格式转换器/requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nuitka
+
+      - name: 源码自检
+        run: python 主程序.py --selfcheck
+        env:
+          CI: 'true'
+
+      - name: Nuitka 编译
+        run: |
+          python -m nuitka `
+            --standalone `
+            --msvc=latest `
+            --assume-yes-for-downloads `
+            --enable-plugin=pythonnet `
+            --include-package=webview `
+            --include-package=clr_loader `
+            --include-package=pythonnet `
+            --include-data-dir=前端=前端 `
+            --include-data-dir=图片素材=图片素材 `
+            --windows-icon-from-ico=图片素材/湍流模型.ico `
+            --output-dir=build `
+            --output-filename=JinshouzhiConverter.exe `
+            --company-name="Turbulence Model" `
+            --product-name="金手指格式转换器" `
+            --file-version=1.0.0.0 `
+            --product-version=1.0.0 `
+            主程序.py
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 金手指格式转换器-windows
+          # ⚠ 这里不能用 defaults 的 working-directory，
+          #   artifact 的 path 永远相对于仓库根
+          path: Pywebview/金手指格式转换器/build/主程序.dist/
+          if-no-files-found: error
