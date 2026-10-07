@@ -1,0 +1,544 @@
+/* ==========================================================================
+   金手指格式转换器 · 样式
+   --------------------------------------------------------------------------
+   想换配色 / 圆角 / 间距，绝大多数情况下只需要改本文件最上面这一段变量。
+
+   变量分两层：
+     · 表面色（底 / 卡片 / 边框 / 文字…）只分「浅色」「深色」两套
+     · 强调色按「配色主题」分四套，深浅各一份（深色下会调亮一点，否则发闷）
+   ========================================================================== */
+
+/* ---------- 基础 ---------- */
+:root {
+  --圆角: 12px;
+  --圆角小: 9px;
+  --过渡: 0.16s cubic-bezier(0.4, 0, 0.2, 1);
+  --界面字体: "霞鹜文楷", "LXGW WenKai", "Microsoft YaHei UI", "微软雅黑",
+               system-ui, "Segoe UI", "PingFang SC", sans-serif;
+  --等宽字体: "Cascadia Mono", Consolas, "JetBrains Mono", "Sarasa Mono SC",
+               "DejaVu Sans Mono", monospace;
+  --间距: 16px;
+}
+
+/* ---------- 浅色表面 ---------- */
+html[data-外观="light"] {
+  --底: #EDF2F1;
+  --侧栏: #E1E9E7;
+  --卡片: #F8FBFA;
+  --浮起: #FFFFFF;
+  --输入底: #FBFDFC;
+  --边框: #C9D5D2;
+  --分隔线: #DCE4E2;
+  --文字: #16211F;
+  --次要: #66746F;
+  --很淡: #8C9A96;
+  --选中底: #D2E0DC;
+  --滚动条: #B7C6C3;
+  --阴影: 0 6px 20px rgba(20, 40, 36, 0.08);
+  --阴影大: 0 18px 48px rgba(20, 40, 36, 0.18);
+  --危险: #C0392B;
+  --危险底: #FDECEA;
+}
+
+/* ---------- 深色表面 ---------- */
+html[data-外观="dark"] {
+  --底: #121817;
+  --侧栏: #1A2120;
+  --卡片: #1C2524;
+  --浮起: #243030;
+  --输入底: #182120;
+  --边框: #333F3C;
+  --分隔线: #2A3533;
+  --文字: #DCE7E4;
+  --次要: #8FA09C;
+  --很淡: #6E7D79;
+  --选中底: #2A3835;
+  --滚动条: #3B4744;
+  --阴影: 0 6px 20px rgba(0, 0, 0, 0.35);
+  --阴影大: 0 18px 48px rgba(0, 0, 0, 0.55);
+  --危险: #F2705E;
+  --危险底: #34201E;
+}
+
+/* ---------- 强调色：四套配色 × 明暗 ---------- */
+/* 青瓷（默认）：低饱和青绿 */
+html[data-配色="青瓷"][data-外观="light"] { --强调: #1F8A70; --强调悬停: #196E5A; --强调文字: #F4FBF9; --强调淡: #DCEBE6; }
+html[data-配色="青瓷"][data-外观="dark"]  { --强调: #2FA98C; --强调悬停: #279178; --强调文字: #06231B; --强调淡: #1E3A34; }
+
+/* 黛蓝：正经工具感 */
+html[data-配色="黛蓝"][data-外观="light"] { --强调: #2C6FB5; --强调悬停: #235A93; --强调文字: #F5F9FD; --强调淡: #DCE7F3; }
+html[data-配色="黛蓝"][data-外观="dark"]  { --强调: #4E9BE0; --强调悬停: #3F85C4; --强调文字: #06192B; --强调淡: #1D3348; }
+
+/* 紫棠：柔和一点 */
+html[data-配色="紫棠"][data-外观="light"] { --强调: #7A5AC7; --强调悬停: #6549A8; --强调文字: #F8F6FE; --强调淡: #E7E1F6; }
+html[data-配色="紫棠"][data-外观="dark"]  { --强调: #A48BE8; --强调悬停: #8C74CE; --强调文字: #17102B; --强调淡: #322A4A; }
+
+/* 琥珀：暖色，和你那句题记挺搭 */
+html[data-配色="琥珀"][data-外观="light"] { --强调: #B8792A; --强调悬停: #9A6422; --强调文字: #FFF9F0; --强调淡: #F3E5D2; }
+html[data-配色="琥珀"][data-外观="dark"]  { --强调: #E0A951; --强调悬停: #C4903F; --强调文字: #2B1D05; --强调淡: #3D3222; }
+
+/* ---------- 全局 ---------- */
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--界面字体);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--文字);
+  background: var(--底);
+  overflow: hidden;
+  user-select: none;              /* 应用外壳不让选中，文本框单独放开 */
+  -webkit-font-smoothing: antialiased;
+}
+
+.可选中, textarea, input, code { user-select: text; }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+
+:focus-visible {
+  outline: 2px solid var(--强调);
+  outline-offset: 2px;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--滚动条);
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--次要); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------- 骨架布局 ---------- */
+.应用 {
+  display: grid;
+  grid-template-columns: 216px 1fr;
+  height: 100vh;
+}
+
+/* ---------- 侧栏 ---------- */
+.侧栏 {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 12px 12px;
+  background: var(--侧栏);
+  border-right: 1px solid var(--边框);
+}
+
+.品牌 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px 14px;
+}
+
+.品牌图标 {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  flex: none;
+}
+
+.品牌文字 { min-width: 0; }
+
+.应用名 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.版本 {
+  font-size: 11.5px;
+  color: var(--很淡);
+  margin-top: 1px;
+}
+
+.导航 { display: flex; flex-direction: column; gap: 4px; }
+
+.导航项 {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--圆角小);
+  background: transparent;
+  color: var(--文字);
+  text-align: left;
+  transition: background var(--过渡), color var(--过渡);
+}
+
+.导航项:hover { background: var(--选中底); }
+.导航项.选中 { background: var(--选中底); font-weight: 600; }
+
+/* 选中项左侧那根小竖条 */
+.导航点 {
+  width: 3px;
+  height: 0;
+  border-radius: 2px;
+  background: var(--强调);
+  transition: height var(--过渡);
+}
+.导航项.选中 .导航点 { height: 16px; }
+
+.弹簧 { flex: 1; }
+
+.设置区 { padding: 0 6px; }
+
+.设置标题 {
+  font-size: 11.5px;
+  color: var(--很淡);
+  margin: 12px 0 6px;
+}
+.设置区 > .设置标题:first-child { margin-top: 0; }
+
+/* 分段控件 */
+.分段 {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--圆角小);
+  background: var(--选中底);
+}
+
+.分段 button {
+  padding: 6px 2px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--次要);
+  font-size: 12px;
+  white-space: nowrap;      /* 侧栏窄，别让"跟随系统"折成两行 */
+  transition: background var(--过渡), color var(--过渡);
+}
+.分段 button:hover { color: var(--文字); }
+.分段 button.选中 {
+  background: var(--强调);
+  color: var(--强调文字);
+  font-weight: 600;
+}
+
+/* 配色小圆点 */
+.配色行 { display: flex; gap: 10px; padding: 2px; }
+
+.色点 {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  transition: transform var(--过渡), border-color var(--过渡);
+}
+.色点:hover { transform: scale(1.12); }
+.色点.选中 { border-color: var(--文字); }
+
+.题记 {
+  padding: 14px 6px 4px;
+  font-size: 11.5px;
+  color: var(--很淡);
+  line-height: 1.7;
+}
+
+/* ---------- 主区 ---------- */
+.主区 {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 18px 18px 10px;
+  overflow: hidden;
+}
+
+.页面 { display: none; flex-direction: column; min-height: 0; flex: 1; }
+.页面.显示 { display: flex; animation: 淡入 0.18s ease-out; }
+
+@keyframes 淡入 {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.页眉 { padding: 2px 2px 14px; }
+
+.大标题 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.副标题 {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--次要);
+}
+
+/* ---------- 卡片 ---------- */
+.卡片 {
+  background: var(--卡片);
+  border: 1px solid var(--边框);
+  border-radius: 14px;
+  box-shadow: var(--阴影);
+}
+
+.主卡片 {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: var(--间距);
+  gap: 12px;
+}
+
+.关于卡片 { overflow-y: auto; padding: 20px 22px; }
+
+/* ---------- 按钮 ---------- */
+.按钮 {
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--圆角小);
+  background: transparent;
+  font-size: 13.5px;
+  transition: background var(--过渡), border-color var(--过渡),
+              color var(--过渡), transform 0.08s ease;
+}
+.按钮:active { transform: translateY(1px); }
+.按钮:disabled { opacity: 0.55; cursor: default; transform: none; }
+
+.主按钮 {
+  background: var(--强调);
+  color: var(--强调文字);
+  font-weight: 600;
+  min-width: 116px;
+}
+.主按钮:hover:not(:disabled) { background: var(--强调悬停); }
+
+.次按钮 {
+  border-color: var(--边框);
+  color: var(--文字);
+}
+.次按钮:hover:not(:disabled) { background: var(--选中底); border-color: var(--次要); }
+
+.窄 { padding: 0 12px; }
+
+.工具条 { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------- 文本区 ---------- */
+.文本行 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+  min-height: 0;
+}
+.文本行.撑开 { flex: 1; }
+
+.文本头 { display: flex; align-items: baseline; gap: 8px; }
+
+.文本标题 { font-size: 14px; font-weight: 700; }
+
+.文本提示 {
+  font-size: 11.5px;
+  color: var(--很淡);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.文本框 {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px 12px;
+  border: 1px solid var(--边框);
+  border-radius: 10px;
+  background: var(--输入底);
+  color: var(--文字);
+  font-family: var(--等宽字体);
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: none;
+  transition: border-color var(--过渡), box-shadow var(--过渡);
+}
+.文本框::placeholder { color: var(--很淡); }
+.文本框:focus {
+  outline: none;
+  border-color: var(--强调);
+  box-shadow: 0 0 0 3px var(--强调淡);
+}
+.文本框[readonly] { color: var(--文字); }
+
+/* ---------- 进度与统计 ---------- */
+.进度行 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.进度轨道 {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--选中底);
+  overflow: hidden;
+}
+
+.进度条 {
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--强调);
+  transition: width 0.12s linear;
+}
+
+.统计 {
+  font-size: 11.5px;
+  color: var(--次要);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 状态栏 ---------- */
+.状态栏 {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 4px 0;
+  font-size: 11.5px;
+  color: var(--次要);
+}
+
+.状态文字 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.状态提示 { color: var(--很淡); white-space: nowrap; }
+
+/* ---------- 关于页 ---------- */
+.信息表 {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 18px;
+  font-size: 13px;
+}
+.信息键 { color: var(--次要); white-space: nowrap; }
+.信息值 { color: var(--文字); word-break: break-all; }
+
+.小节标题 {
+  margin: 22px 0 10px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.快捷键表 {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 7px 18px;
+  font-size: 12.5px;
+}
+.键 {
+  font-family: var(--等宽字体);
+  font-size: 11.5px;
+  color: var(--文字);
+  background: var(--选中底);
+  border: 1px solid var(--边框);
+  border-radius: 6px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.义 { color: var(--次要); }
+
+.按钮排 { display: flex; gap: 8px; margin-top: 22px; flex-wrap: wrap; }
+
+.脚注 {
+  margin: 18px 0 0;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--很淡);
+}
+.脚注 code {
+  font-family: var(--等宽字体);
+  font-size: 11.5px;
+  background: var(--选中底);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* ---------- 拖拽层 ---------- */
+.拖拽层 {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--底) 78%, transparent);
+  backdrop-filter: blur(2px);
+  z-index: 50;
+}
+.拖拽层.激活 { display: flex; }
+
+.拖拽提示 {
+  padding: 28px 46px;
+  border: 2px dashed var(--强调);
+  border-radius: 18px;
+  background: var(--卡片);
+  color: var(--强调);
+  font-size: 16px;
+  font-weight: 700;
+  box-shadow: var(--阴影大);
+}
+
+/* ---------- 右下角提示气泡 ---------- */
+.提示层 {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.提示 {
+  max-width: 420px;
+  padding: 10px 14px;
+  border: 1px solid var(--边框);
+  border-left: 3px solid var(--强调);
+  border-radius: 10px;
+  background: var(--卡片);
+  color: var(--文字);
+  font-size: 12.5px;
+  line-height: 1.6;
+  box-shadow: var(--阴影大);
+  animation: 冒出 0.2s ease-out;
+}
+.提示.错误 { border-left-color: var(--危险); background: var(--危险底); }
+.提示.淡出 { opacity: 0; transform: translateY(6px); transition: all 0.25s ease-in; }
+
+@keyframes 冒出 {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- 窄窗口兜底 ---------- */
+@media (max-width: 900px) {
+  .应用 { grid-template-columns: 168px 1fr; }
+  .文本行 { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .文本行 .文本头:nth-child(2) { display: none; }
+  .品牌图标 { width: 28px; height: 28px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
