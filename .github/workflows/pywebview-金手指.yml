@@ -52,7 +52,9 @@ jobs:
             --standalone `
             --msvc=latest `
             --assume-yes-for-downloads `
-            --include-package=webview `
+            --enable-plugin=pywebview `
+            --nofollow-import-to=webview.platforms.android `
+            --include-package-data=webview `
             --include-package=clr_loader `
             --include-package=pythonnet `
             --include-package=Python.Runtime `
