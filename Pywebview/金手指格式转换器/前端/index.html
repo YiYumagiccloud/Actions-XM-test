@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN" data-外观="dark" data-配色="青瓷">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>金手指格式转换器</title>
+<!--
+  界面全部在这里。想改样子：
+
+    前端/index.html    结构和文字
+    前端/样式.css      配色、圆角、间距（顶部一堆 CSS 变量，改那里最快）
+    前端/界面.js       交互逻辑、和后端 Python 的对话
+
+  和后端唯一的通道是 window.pywebview.api.xxx(…)，都是异步的（返回 Promise）。
+  后端函数写在 后端/接口.py 里，业务逻辑在 后端/转换.py 里。
+-->
+<link rel="stylesheet" href="样式.css">
+</head>
+<body>
+
+<div class="应用">
+
+  <!-- ================= 左侧栏 ================= -->
+  <aside class="侧栏">
+    <div class="品牌">
+      <!-- 品牌标记用内联 SVG：清晰、跟主题色走、还不占一个图片请求。
+           （页面是由 pywebview 的内部服务从「前端/」这个目录提供的，
+             上层目录的图片/字体加载不进来，所以前端自己的东西都放这个目录里。） -->
+      <svg class="品牌图标" viewBox="0 0 40 40" aria-hidden="true">
+        <rect x="0" y="0" width="40" height="40" rx="11" fill="var(--强调)"/>
+        <path d="M11.5 27.5C11 17.5 18 10.5 28.5 10.5c.6 10.5-6.4 17.5-17 17z"
+              fill="var(--强调文字)" opacity="0.93"/>
+        <path d="M13.5 25.5c3.5-2.5 7.5-5.8 11-9.5" fill="none"
+              stroke="var(--强调)" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+      </svg>
+      <div class="品牌文字">
+        <div class="应用名">金手指格式转换器</div>
+        <div class="版本" id="版本行">v—</div>
+      </div>
+    </div>
+
+    <nav class="导航">
+      <button class="导航项 选中" data-页面="转换">
+        <span class="导航点"></span>转换
+      </button>
+      <button class="导航项" data-页面="关于">
+        <span class="导航点"></span>关于
+      </button>
+    </nav>
+
+    <div class="弹簧"></div>
+
+    <div class="设置区">
+      <div class="设置标题">外观</div>
+      <div class="分段" id="外观分段" role="group" aria-label="外观模式">
+        <button data-外观值="light" title="浅色">浅色</button>
+        <button data-外观值="dark" title="深色">深色</button>
+        <button data-外观值="system" title="跟随系统">跟随</button>
+      </div>
+
+      <div class="设置标题">配色</div>
+      <div class="配色行" id="配色行" role="group" aria-label="配色主题"></div>
+    </div>
+
+    <div class="题记">寒夜客来茶当酒，<br>竹炉汤沸火初红</div>
+  </aside>
+
+  <!-- ================= 主区 ================= -->
+  <main class="主区">
+
+    <!-- ---------- 页面：转换 ---------- -->
+    <section class="页面 显示" data-页面名="转换">
+      <header class="页眉">
+        <h1 class="大标题">金手指格式转换</h1>
+        <p class="副标题">左边贴 usrcheat.xml 原文，右边出 CAT / CODE 文本</p>
+      </header>
+
+      <div class="卡片 主卡片">
+        <div class="工具条">
+          <button class="按钮 主按钮" id="按钮-转换">开始转换</button>
+          <button class="按钮 次按钮" id="按钮-打开">打开 XML</button>
+          <button class="按钮 次按钮" id="按钮-保存">保存结果</button>
+          <button class="按钮 次按钮" id="按钮-复制">复制结果</button>
+          <button class="按钮 次按钮 窄" id="按钮-清空">清空</button>
+        </div>
+
+        <div class="文本行">
+          <div class="文本头">
+            <span class="文本标题">输入</span>
+            <span class="文本提示">usrcheat.xml 原文 · 也可以直接把文件拖进来</span>
+          </div>
+          <div class="文本头">
+            <span class="文本标题">输出</span>
+            <span class="文本提示" id="输出提示">CAT / CODE</span>
+          </div>
+        </div>
+
+        <div class="文本行 撑开">
+          <textarea id="输入框" class="文本框 可选中" spellcheck="false" wrap="off"
+                    placeholder="把 usrcheat.xml 的内容贴在这里，或者直接把文件拖到窗口里…"></textarea>
+          <textarea id="输出框" class="文本框 可选中" spellcheck="false" wrap="off" readonly
+                    placeholder="转换结果会出现在这里"></textarea>
+        </div>
+
+        <div class="进度行">
+          <div class="进度轨道"><div class="进度条" id="进度条"></div></div>
+          <div class="统计" id="统计">0 行 / 0 字</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 页面：关于 ---------- -->
+    <section class="页面" data-页面名="关于">
+      <header class="页眉">
+        <h1 class="大标题">关于</h1>
+        <p class="副标题">运行环境、快捷键，以及一些说明</p>
+      </header>
+
+      <div class="卡片 主卡片 关于卡片">
+        <div class="信息表" id="信息表"></div>
+
+        <h2 class="小节标题">快捷键</h2>
+        <div class="快捷键表">
+          <div class="键">Ctrl + O</div><div class="义">打开 XML 文件</div>
+          <div class="键">Ctrl + Enter</div><div class="义">开始转换</div>
+          <div class="键">Ctrl + S</div><div class="义">保存结果</div>
+          <div class="键">Ctrl + Shift + C</div><div class="义">复制结果</div>
+          <div class="键">Ctrl + L</div><div class="义">清空</div>
+          <div class="键">F1</div><div class="义">切到「关于」</div>
+        </div>
+
+        <div class="按钮排">
+          <button class="按钮 次按钮" id="按钮-目录">打开程序目录</button>
+          <button class="按钮 次按钮" id="按钮-环境">复制环境信息</button>
+          <button class="按钮 次按钮" id="按钮-退出">退出</button>
+        </div>
+
+        <p class="脚注">
+          界面用 pywebview + WebView2 渲染，逻辑全在 Python 里。<br>
+          改配色：<code>前端/样式.css</code> 顶部的 CSS 变量；改转换规则：<code>后端/转换.py</code>。
+        </p>
+      </div>
+    </section>
+
+    <footer class="状态栏">
+      <span class="状态文字" id="状态文字">正在启动…</span>
+      <span class="状态提示">Ctrl+O 打开 · Ctrl+Enter 转换 · Ctrl+S 保存</span>
+    </footer>
+  </main>
+</div>
+
+<!-- 拖拽文件时的整窗提示 -->
+<div class="拖拽层" id="拖拽层"><div class="拖拽提示">松手，把文件读进来</div></div>
+
+<!-- 右下角提示气泡 -->
+<div class="提示层" id="提示层"></div>
+
+<script src="界面.js"></script>
+</body>
+</html>
