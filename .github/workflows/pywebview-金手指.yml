@@ -52,12 +52,10 @@ jobs:
             --standalone `
             --msvc=latest `
             --assume-yes-for-downloads `
-            --enable-plugin=pywebview `
             --nofollow-import-to=webview.platforms.android `
             --include-package-data=webview `
             --include-package=clr_loader `
             --include-package=pythonnet `
-            --include-package=Python.Runtime `
             --include-data-dir=前端=前端 `
             --include-data-dir=图片素材=图片素材 `
             --windows-icon-from-ico=图片素材/湍流模型.ico `
@@ -68,7 +66,9 @@ jobs:
       - name: 复制 Python.Runtime.dll
         run: |
           $dll = python -c "import pythonnet, os; print(os.path.join(os.path.dirname(pythonnet.__file__), 'runtime', 'Python.Runtime.dll'))"
+          Write-Host "DLL 路径：$dll"
           Copy-Item $dll -Destination build\主程序.dist\ -Force
+          Get-ChildItem build\主程序.dist\Python.Runtime.dll | Select-Object Name, Length
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
