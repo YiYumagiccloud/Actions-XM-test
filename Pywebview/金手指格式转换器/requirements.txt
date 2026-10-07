@@ -1,0 +1,7 @@
+# 运行程序需要的依赖（pip install -r requirements.txt）
+pywebview==6.2.1
+# 下面这几个是 pywebview 在 Windows 上自动带上的，列出来只是让你知道它们从哪来：
+#   pythonnet   通过 .NET 调 WinForms / WebView2
+#   clr_loader  负责把 .NET 运行时加载起来
+#   bottle      内置的本地 http 服务（前端页面和 JS 接口都靠它）
+#   proxy_tools
