@@ -42,46 +42,48 @@ jobs:
 
       - name: 查看环境
         run: |
-          python -m nuitka --version
-          python -c "import pefile; print('pefile', pefile.__version__)"
+          pyinstaller --version
+          python -c "import webview; print('pywebview', webview.__version__)"
 
       - name: 源码自检
         run: python 主程序.py --selfcheck
 
-      - name: Nuitka 编译
+      - name: PyInstaller 打包
         run: |
-          python -m nuitka `
-            --standalone `
-            --msvc=latest `
-            --assume-yes-for-downloads `
-            --windows-dependency-tool=pefile `
-            --nofollow-import-to=webview.platforms.android `
-            --include-package-data=webview `
-            --include-package=clr_loader `
-            --include-package=pythonnet `
-            --include-data-dir=前端=前端 `
-            --include-data-dir=图片素材=图片素材 `
-            --windows-icon-from-ico=图片素材/湍流模型.ico `
-            --output-dir=build `
-            --output-filename=JinshouzhiConverter.exe `
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --windowed `
+            --name JinshouzhiConverter `
+            --collect-all webview `
+            --hidden-import=clr_loader `
+            --hidden-import=pythonnet `
+            --hidden-import=clr `
+            --add-data "前端;前端" `
+            --add-data "图片素材;图片素材" `
+            --icon "图片素材\湍流模型.ico" `
             主程序.py
 
-      - name: 复制 pythonnet runtime 目录
-        shell: pwsh
+      - name: 检查产物
         run: |
-          $rt = python -c "import pythonnet, os; print(os.path.join(os.path.dirname(pythonnet.__file__), 'runtime'))"
-          Write-Host "runtime 目录：$rt"
-          Copy-Item "$rt\*" -Destination build\主程序.dist\ -Force -Recurse
-          Get-ChildItem build\主程序.dist\Python.Runtime.dll | Select-Object Name, Length
+          Get-ChildItem dist\JinshouzhiConverter\ -Filter *.exe
+          Get-ChildItem dist\JinshouzhiConverter\ -Filter *.dll | Select-Object -First 10
+          if (Test-Path dist\JinshouzhiConverter\Python.Runtime.dll) {
+            Write-Host "Python.Runtime.dll 已包含"
+          } else {
+            Write-Warning "Python.Runtime.dll 未找到，可能需要手动复制"
+          }
 
       - name: 打包产物
-        run: |
-          Compress-Archive -Path build\主程序.dist\* -DestinationPath build\金手指格式转换器-windows.zip -Force
         shell: pwsh
+        run: |
+          Compress-Archive -Path dist\JinshouzhiConverter\* `
+            -DestinationPath dist\金手指格式转换器-windows.zip -Force
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: 金手指格式转换器-windows
-          path: Pywebview/金手指格式转换器/build/金手指格式转换器-windows.zip
+          path: Pywebview/金手指格式转换器/dist/金手指格式转换器-windows.zip
           if-no-files-found: error
