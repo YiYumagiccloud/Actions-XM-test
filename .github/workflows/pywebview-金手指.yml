@@ -40,12 +40,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-build.txt
 
-      - name: 查看环境
-        run: |
-          pyinstaller --version
-          python -c "from importlib.metadata import version; print('pywebview', version('pywebview'))"
-          python -c "import pythonnet; print('pythonnet', pythonnet.__version__)"
-
       - name: 源码自检
         run: python 主程序.py --selfcheck
 
