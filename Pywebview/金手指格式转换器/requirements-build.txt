@@ -1,9 +1,1 @@
-# 只有打包的时候才需要装（pip install -r requirements-build.txt）
-nuitka>=2.6
-# 单文件模式用的压缩库，装了打出来的 exe 更小、生成更快
-zstandard>=0.22
-
-pefile
-# 另外还需要一个 C 编译器：
-#   Windows → 装 Visual Studio 生成工具，勾选「使用 C++ 的桌面开发」
-#   （没装的话 Nuitka 会自动去下 MinGW 兜底，就是慢一点）
+pyinstaller>=6.0
