@@ -43,7 +43,8 @@ jobs:
       - name: 查看环境
         run: |
           pyinstaller --version
-          python -c "import webview; print('pywebview', webview.__version__)"
+          python -c "from importlib.metadata import version; print('pywebview', version('pywebview'))"
+          python -c "import pythonnet; print('pythonnet', pythonnet.__version__)"
 
       - name: 源码自检
         run: python 主程序.py --selfcheck
