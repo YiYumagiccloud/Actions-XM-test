@@ -60,15 +60,23 @@ jobs:
             --icon "图片素材\湍流模型.ico" `
             主程序.py
 
+      - name: 复制 Python.Runtime.dll
+        shell: pwsh
+        run: |
+          $dst = "dist\JinshouzhiConverter"
+          $src = python -c "import pythonnet, os; print(os.path.join(os.path.dirname(pythonnet.__file__), 'runtime'))"
+          Write-Host "runtime 源目录：$src"
+          Copy-Item "$src\*" -Destination $dst -Force -Recurse
+          Get-ChildItem "$dst\Python.Runtime.dll" | Select-Object Name, Length
+
       - name: 检查产物
+        shell: pwsh
         run: |
           Get-ChildItem dist\JinshouzhiConverter\ -Filter *.exe
-          Get-ChildItem dist\JinshouzhiConverter\ -Filter *.dll | Select-Object -First 10
-          if (Test-Path dist\JinshouzhiConverter\Python.Runtime.dll) {
-            Write-Host "Python.Runtime.dll 已包含"
-          } else {
-            Write-Warning "Python.Runtime.dll 未找到，可能需要手动复制"
+          if (-not (Test-Path dist\JinshouzhiConverter\Python.Runtime.dll)) {
+            throw "Python.Runtime.dll 缺失，打包不完整"
           }
+          Write-Host "Python.Runtime.dll 已包含"
 
       - name: 打包产物
         shell: pwsh
