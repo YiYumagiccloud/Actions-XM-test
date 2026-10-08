@@ -4,18 +4,22 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - '金手指-v*'          # 打 tag 触发，前缀区分项目
+      - '金手指-v*'
     paths:
-      - 'Pywebview/金手指格式转换器/**'   # 只有这个目录变了才自动跑
-
-# 让下面所有 run 步骤默认在这个目录里执行
-defaults:
-  run:
-    working-directory: Pywebview/金手指格式转换器
+      - 'Pywebview/金手指格式转换器/**'
 
 jobs:
   build:
     runs-on: windows-latest
+
+    env:
+      PYTHONIOENCODING: 'utf-8'
+      PYTHONUTF8: '1'
+      CI: 'true'
+
+    defaults:
+      run:
+        working-directory: Pywebview/金手指格式转换器
 
     steps:
       - name: 检出代码
@@ -34,38 +38,15 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-build.txt
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: 查看环境
+        run: |
+          python -m nuitka --version
+          python -c "import pefile; print('pefile', pefile.__version__)"
 
       - name: 源码自检
         run: python 主程序.py --selfcheck
-        env:
-          CI: 'true'
-          PYTHONIOENCODING: 'utf-8'
-
-      - name: 查看 Nuitka 版本
-        run: python -m nuitka --version
-
-      - name: 缓存 Nuitka 下载目录
-        uses: actions/cache@v4
-        with:
-          path: C:\Users\runneradmin\AppData\Local\Nuitka\Nuitka\Cache\downloads
-          key: nuitka-downloads-${{ runner.os }}-v1
-
-      - name: 预下载 depends.exe
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $dest = "$env:LOCALAPPDATA\Nuitka\Nuitka\Cache\downloads\depends\x86_64"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          try {
-            Invoke-WebRequest -Uri "https://dependencywalker.com/depends22_x64.zip" `
-              -OutFile "$env:TEMP\depends.zip" -TimeoutSec 120
-            Expand-Archive "$env:TEMP\depends.zip" -DestinationPath $dest -Force
-            Write-Host "depends.exe 预下载成功"
-          } catch {
-            Write-Host "预下载失败（Nuitka 会自己试）：$_"
-          }
 
       - name: Nuitka 编译
         run: |
@@ -73,6 +54,7 @@ jobs:
             --standalone `
             --msvc=latest `
             --assume-yes-for-downloads `
+            --windows-dependency-tool=pefile `
             --nofollow-import-to=webview.platforms.android `
             --include-package-data=webview `
             --include-package=clr_loader `
@@ -84,18 +66,22 @@ jobs:
             --output-filename=JinshouzhiConverter.exe `
             主程序.py
 
-      - name: 复制 Python.Runtime.dll
+      - name: 复制 pythonnet runtime 目录
+        shell: pwsh
         run: |
-          $dll = python -c "import pythonnet, os; print(os.path.join(os.path.dirname(pythonnet.__file__), 'runtime', 'Python.Runtime.dll'))"
-          Write-Host "DLL 路径：$dll"
-          Copy-Item $dll -Destination build\主程序.dist\ -Force
+          $rt = python -c "import pythonnet, os; print(os.path.join(os.path.dirname(pythonnet.__file__), 'runtime'))"
+          Write-Host "runtime 目录：$rt"
+          Copy-Item "$rt\*" -Destination build\主程序.dist\ -Force -Recurse
           Get-ChildItem build\主程序.dist\Python.Runtime.dll | Select-Object Name, Length
+
+      - name: 打包产物
+        run: |
+          Compress-Archive -Path build\主程序.dist\* -DestinationPath build\金手指格式转换器-windows.zip -Force
+        shell: pwsh
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: 金手指格式转换器-windows
-          # ⚠ 这里不能用 defaults 的 working-directory，
-          #   artifact 的 path 永远相对于仓库根
-          path: Pywebview/金手指格式转换器/build/主程序.dist/
+          path: Pywebview/金手指格式转换器/build/金手指格式转换器-windows.zip
           if-no-files-found: error
