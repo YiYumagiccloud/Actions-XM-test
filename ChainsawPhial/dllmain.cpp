@@ -388,7 +388,7 @@ void ConsolePrint(const wchar_t* message)
 
         return true;
     }
-
+}
 
 void ThreadLoop()
 {
