@@ -1,43 +1,58 @@
-name: Build MHW Mod
+name: 构建 MHW 模组
 
 on:
-  push:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # 允许手动点击运行
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 / Tag（例如 v1.0.0，留空则自动使用 v<运行编号>）'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
+    - name: 检出仓库
       uses: actions/checkout@v4
 
-    - name: Setup MSVC
+    - name: 配置 MSVC 编译环境
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Configure CMake
-      run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}}/ChainsawPhial -A x64
+    - name: 配置 CMake
+      run: cmake -B ${{ github.workspace }}/build -S ${{ github.workspace }}/ChainsawPhial -A x64
 
-    - name: Build
-      run: cmake --build ${{github.workspace}}/build --config Release
+    - name: 编译（Release）
+      run: cmake --build ${{ github.workspace }}/build --config Release
 
-    - name: Prepare Release Asset
+    - name: 准备发布文件
       run: |
         mkdir output
         copy build\Release\ChainsawPhial.dll output\
 
-    - name: Upload Artifact
+    - name: 上传构建产物（Artifact）
       uses: actions/upload-artifact@v4
       with:
         name: ChainsawPhial-DLL
         path: output/ChainsawPhial.dll
 
-    # 可选：如果你在仓库打了 tag，自动发布到 Release
-    - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/v')
-      uses: softprops/action-gh-release@v1
+    - name: 计算发布版本号
+      id: version
+      shell: bash
+      run: |
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "tag=v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: 自动创建 Release 并上传 DLL
+      uses: softprops/action-gh-release@v2
       with:
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: ${{ steps.version.outputs.tag }}
         files: output/ChainsawPhial.dll
+        generate_release_notes: true
+        target_commitish: ${{ github.sha }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
