@@ -19,9 +19,10 @@ namespace
         0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72
     };
 
-    // 取消一解二解重置电锯时间
-    // 抓到的特征码：89 83 70 24 00 00
+
+    // 精确特征码：前面一句 mov eax,[rsi+E20] + 你要 NOP 的那句
     const std::vector<int> kResetTimePattern = {
+        0x8B, 0x86, 0x20, 0x0E, 0x00, 0x00, 
         0x89, 0x83, 0x70, 0x24, 0x00, 0x00
     };
 
@@ -391,11 +392,15 @@ namespace
     // 2. 取消一解二解重置电锯时间
     bool SetupResetTimePatch()
     {
-        const uintptr_t scanAddr =
+        // 找到唯一的特征码地址（对应图中的 +288）
+        const uintptr_t baseAddr =
             ScanPattern("MonsterHunterWorld.exe", kResetTimePattern);
 
-        if (!scanAddr)
+        if (!baseAddr)
             return false;
+
+        // 因为特征码前面有 6 个字节，所以目标指令（+289）在 baseAddr + 6 的位置
+        const uintptr_t scanAddr = baseAddr + 6;
 
         DWORD oldProtect = 0;
 
@@ -430,6 +435,11 @@ namespace
             6,
             oldProtect,
             &ignoredProtect);
+
+        // 打印修改的地址，方便你在 CE 里核对
+        wchar_t debugMsg[128];
+        swprintf_s(debugMsg, L"[Chainsaw Phial] Reset timer patched at: 0x%p\r\n", reinterpret_cast<void*>(scanAddr));
+        ConsolePrint(debugMsg);
 
         return true;
     }
