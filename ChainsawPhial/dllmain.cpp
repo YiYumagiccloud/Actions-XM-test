@@ -382,6 +382,57 @@ namespace
         return true;
     }
 
+    // 取消一解、二解时的电锯时间重置。
+    bool SetupResetTimePatch()
+    {
+        constexpr size_t kResetTimePatchLength = 6;
+
+        const std::vector<int> pattern = {
+            0x89, 0x83, 0x70, 0x24, 0x00, 0x00
+        };
+
+        const uintptr_t scanAddr =
+            ScanPattern("MonsterHunterWorld.exe", pattern);
+
+        if (!scanAddr)
+            return false;
+
+        DWORD oldProtect = 0;
+
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(scanAddr),
+                kResetTimePatchLength,
+                PAGE_EXECUTE_READWRITE,
+                &oldProtect))
+        {
+            return false;
+        }
+
+        const uint8_t nops[kResetTimePatchLength] = {
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90
+        };
+
+        std::memcpy(
+            reinterpret_cast<void*>(scanAddr),
+            nops,
+            sizeof(nops));
+
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            reinterpret_cast<LPCVOID>(scanAddr),
+            kResetTimePatchLength);
+
+        DWORD ignoredProtect = 0;
+
+        const bool restored = VirtualProtect(
+            reinterpret_cast<void*>(scanAddr),
+            kResetTimePatchLength,
+            oldProtect,
+            &ignoredProtect) != FALSE;
+
+        return restored;
+    }
+
     void ThreadLoop()
     {
         InitConsole();
@@ -408,6 +459,17 @@ namespace
                 {
                     ConsolePrint(
                         L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
+
+                    if (SetupResetTimePatch())
+                    {
+                        ConsolePrint(
+                            L"[Chainsaw Phial] Reset time patch applied successfully.\r\n");
+                    }
+                    else
+                    {
+                        ConsolePrint(
+                            L"[Chainsaw Phial] Reset time patch installation failed.\r\n");
+                    }
 
                     return;
                 }
