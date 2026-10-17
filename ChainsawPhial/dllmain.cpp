@@ -2,29 +2,38 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 
 namespace {
     FILE* g_logFile = nullptr;
 
-    // 简单的日志输出函数
     void Log(const char* format, ...) {
         if (!g_logFile) return;
         va_list args;
         va_start(args, format);
         vfprintf(g_logFile, format, args);
         va_end(args);
-        fflush(g_logFile); // 立即写入硬盘，防崩溃丢失
+        fflush(g_logFile); 
     }
 
     void InitLog() {
-        // 将日志保存在 nativePC/plugins 目录下
-        fopen_s(&g_logFile, "nativePC\\plugins\\ChainsawPhial.log", "w");
+        // 获取本 DLL 的绝对路径
+        char path[MAX_PATH];
+        HMODULE hModule = NULL;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)&InitLog, &hModule);
+        GetModuleFileNameA(hModule, path, MAX_PATH);
+        
+        std::string strPath(path);
+        // 替换后缀为 .log
+        strPath = strPath.substr(0, strPath.find_last_of(".")) + ".log";
+        
+        fopen_s(&g_logFile, strPath.c_str(), "w");
         if (g_logFile) {
             Log("=== Chainsaw Phial Mod Loaded ===\n");
         }
     }
 
-    // 安全的 AOB 扫描器
     uintptr_t ScanPattern(const char* moduleName, const std::vector<int>& pattern) {
         uintptr_t moduleBase = (uintptr_t)GetModuleHandleA(moduleName);
         if (!moduleBase) {
@@ -50,7 +59,6 @@ namespace {
             return 0;
         }
 
-        // 修复了数组越界漏洞 (<= 而不是 <)
         for (uint8_t* p = scanStart; p <= scanEnd - pattern.size(); ++p) {
             bool found = true;
             for (size_t i = 0; i < pattern.size(); ++i) {
@@ -67,7 +75,6 @@ namespace {
         return 0;
     }
 
-    // 在目标地址附近分配内存
     uintptr_t AllocNear(uintptr_t target, size_t size) {
         uintptr_t start = target & ~0xFFFF;
         for (uintptr_t addr = start; addr > start - 0x7FFF0000; addr -= 0x10000) {
@@ -79,7 +86,6 @@ namespace {
                 if (p) return (uintptr_t)p;
             }
         }
-        // 如果附近找不到，尝试让系统随机分配（虽然极大概率超过2GB，但万一呢）
         void* p = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
         return (uintptr_t)p;
     }
@@ -98,13 +104,13 @@ namespace {
         Log("[Success] Cave allocated at: %p\n", (void*)caveAddr);
 
         uint8_t code[] = {
-            0xF3, 0x0F, 0x10, 0x8B, 0x70, 0x24, 0x00, 0x00, // movss xmm1, [rbx+2470]
-            0x0F, 0x57, 0xD2,                               // xorps xmm2, xmm2
-            0x0F, 0x2F, 0xCA,                               // comiss xmm1, xmm2
-            0x77, 0x06,                                     // ja skip_consume
-            0x89, 0x8B, 0x74, 0x23, 0x00, 0x00,             // mov [rbx+2374], ecx
-            0x0F, 0x2F, 0x83, 0x70, 0x24, 0x00, 0x00,       // comiss xmm0, [rbx+2470]
-            0xE9, 0x00, 0x00, 0x00, 0x00                    // jmp returnAddr
+            0xF3, 0x0F, 0x10, 0x8B, 0x70, 0x24, 0x00, 0x00, 
+            0x0F, 0x57, 0xD2,                               
+            0x0F, 0x2F, 0xCA,                               
+            0x77, 0x06,                                     
+            0x89, 0x8B, 0x74, 0x23, 0x00, 0x00,             
+            0x0F, 0x2F, 0x83, 0x70, 0x24, 0x00, 0x00,       
+            0xE9, 0x00, 0x00, 0x00, 0x00                    
         };
 
         uintptr_t returnAddr = scanAddr + 6;
@@ -140,10 +146,9 @@ namespace {
     }
 
     void ThreadLoop() {
-        // 如果日志打开失败，不要阻塞游戏
         if (!g_logFile) return;
 
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 60; ++i) { // 多试几次，给游戏加载留时间
             Log("[Info] Attempt %d: Scanning memory...\n", i + 1);
             __try {
                 if (SetupHook()) {
@@ -158,20 +163,20 @@ namespace {
     }
 }
 
-extern "C" __declspec(dllexport) bool Load() {
+// 强制导出 Load (配合 .def 文件最稳)
+extern "C" __declspec(dllexport) void Load() {
+    InitLog(); // 确保日志被初始化
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        InitLog(); // 初始化日志
-        // 等游戏稍微加载一会再开始扫描
-        Sleep(5000);
+        Sleep(3000); // 稍微等一下下
         ThreadLoop();
         return 0;
     }, nullptr, 0, nullptr);
-    return true;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        // 如果 Stracker 没调 Load，为了防止不生效，我们这里不做任何事，完全依赖 Stracker 调 Load。
     }
     return TRUE;
 }
