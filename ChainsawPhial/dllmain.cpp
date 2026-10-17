@@ -1,8 +1,8 @@
-
 #include <windows.h>
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -18,7 +18,6 @@ namespace
     const std::vector<int> kPattern = {
         0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72
     };
-
 
     // 初始化控制台，不创建任何日志文件。
     void InitConsole()
@@ -57,50 +56,47 @@ namespace
         }
     }
 
-
     // 输出一条控制台消息，不写入文件。
-void ConsolePrint(const wchar_t* message)
-{
-    if (!message)
-        return;
-
-    SYSTEMTIME now{};
-    GetLocalTime(&now);
-
-    wchar_t line[768]{};
-
-    const int length = swprintf_s(
-        line,
-        _countof(line),
-        L"[ %02u:%02u:%02u ] %s",
-        static_cast<unsigned>(now.wHour),
-        static_cast<unsigned>(now.wMinute),
-        static_cast<unsigned>(now.wSecond),
-        message
-    );
-
-    if (length <= 0)
-        return;
-
-    if (g_consoleOutput != nullptr &&
-        g_consoleOutput != INVALID_HANDLE_VALUE)
+    void ConsolePrint(const wchar_t* message)
     {
-        DWORD written = 0;
-
-        if (WriteConsoleW(
-                g_consoleOutput,
-                line,
-                static_cast<DWORD>(length),
-                &written,
-                nullptr))
-        {
+        if (!message)
             return;
+
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+
+        wchar_t line[768]{};
+
+        const int length = swprintf_s(
+            line,
+            _countof(line),
+            L"[ %02u:%02u:%02u ] %s",
+            static_cast<unsigned>(now.wHour),
+            static_cast<unsigned>(now.wMinute),
+            static_cast<unsigned>(now.wSecond),
+            message);
+
+        if (length <= 0)
+            return;
+
+        if (g_consoleOutput != nullptr &&
+            g_consoleOutput != INVALID_HANDLE_VALUE)
+        {
+            DWORD written = 0;
+
+            if (WriteConsoleW(
+                    g_consoleOutput,
+                    line,
+                    static_cast<DWORD>(length),
+                    &written,
+                    nullptr))
+            {
+                return;
+            }
         }
+
+        OutputDebugStringW(line);
     }
-
-    OutputDebugStringW(line);
-}
-
 
     uintptr_t ScanPattern(
         const char* moduleName,
@@ -187,7 +183,6 @@ void ConsolePrint(const wchar_t* message)
         return 0;
     }
 
-
     // 保留已验证有效的内存分配方式。
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
@@ -240,7 +235,6 @@ void ConsolePrint(const wchar_t* message)
         return reinterpret_cast<uintptr_t>(memory);
     }
 
-
     bool FitsRel32(int64_t displacement)
     {
         return displacement >=
@@ -248,7 +242,6 @@ void ConsolePrint(const wchar_t* message)
                displacement <=
                    (std::numeric_limits<int32_t>::max)();
     }
-
 
     bool SetupHook()
     {
@@ -388,53 +381,52 @@ void ConsolePrint(const wchar_t* message)
 
         return true;
     }
-}
 
-void ThreadLoop()
-{
-    InitConsole();
-
-    ConsolePrint(
-        L"[Chainsaw Phial] DLL loaded; worker thread started.\r\n");
-
-    ConsolePrint(
-        L"[Chainsaw Phial] Waiting 10 seconds for game initialization...\r\n");
-
-    Sleep(10000);
-
-    ConsolePrint(
-        L"[Chainsaw Phial] Scanning for AOB and installing hook...\r\n");
-
-    constexpr int kMaxAttempts = 30;
-    constexpr DWORD kRetryInterval = 2000;
-
-    for (int i = 0; i < kMaxAttempts; ++i)
+    void ThreadLoop()
     {
-        __try
+        InitConsole();
+
+        ConsolePrint(
+            L"[Chainsaw Phial] DLL loaded; worker thread started.\r\n");
+
+        ConsolePrint(
+            L"[Chainsaw Phial] Waiting 10 seconds for game initialization...\r\n");
+
+        Sleep(10000);
+
+        ConsolePrint(
+            L"[Chainsaw Phial] Scanning for AOB and installing hook...\r\n");
+
+        constexpr int kMaxAttempts = 30;
+        constexpr DWORD kRetryInterval = 2000;
+
+        for (int i = 0; i < kMaxAttempts; ++i)
         {
-            if (SetupHook())
+            __try
             {
-                ConsolePrint(
-                    L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
+                if (SetupHook())
+                {
+                    ConsolePrint(
+                        L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
 
-                return;
+                    return;
+                }
             }
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            // Silent retry; no file logging.
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                // Silent retry; no file logging.
+            }
+
+            if (i + 1 < kMaxAttempts)
+                Sleep(kRetryInterval);
         }
 
-        if (i + 1 < kMaxAttempts)
-            Sleep(kRetryInterval);
+        ConsolePrint(
+            L"[Chainsaw Phial] Hook installation failed after 30 attempts.\r\n");
+
+        g_started.store(false, std::memory_order_release);
     }
-
-    ConsolePrint(
-        L"[Chainsaw Phial] Hook installation failed after 30 attempts.\r\n");
-
-    g_started.store(false, std::memory_order_release);
-}
-
+} // namespace
 
 // Stracker's Loader 导出入口。
 __declspec(dllexport) bool Load()
@@ -473,7 +465,6 @@ __declspec(dllexport) bool Load()
     CloseHandle(thread);
     return true;
 }
-
 
 BOOL APIENTRY DllMain(
     HMODULE hModule,
