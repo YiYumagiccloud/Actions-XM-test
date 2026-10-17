@@ -19,6 +19,12 @@ namespace
         0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72
     };
 
+    // 取消一解二解重置电锯时间
+    // 抓到的特征码：89 83 70 24 00 00
+    const std::vector<int> kResetTimePattern = {
+        0x89, 0x83, 0x70, 0x24, 0x00, 0x00
+    };
+
     // 初始化控制台，不创建任何日志文件。
     void InitConsole()
     {
@@ -382,17 +388,11 @@ namespace
         return true;
     }
 
-    // 取消一解、二解时的电锯时间重置。
+    // 2. 取消一解二解重置电锯时间
     bool SetupResetTimePatch()
     {
-        constexpr size_t kResetTimePatchLength = 6;
-
-        const std::vector<int> pattern = {
-            0x89, 0x83, 0x70, 0x24, 0x00, 0x00
-        };
-
         const uintptr_t scanAddr =
-            ScanPattern("MonsterHunterWorld.exe", pattern);
+            ScanPattern("MonsterHunterWorld.exe", kResetTimePattern);
 
         if (!scanAddr)
             return false;
@@ -401,14 +401,15 @@ namespace
 
         if (!VirtualProtect(
                 reinterpret_cast<void*>(scanAddr),
-                kResetTimePatchLength,
+                6,
                 PAGE_EXECUTE_READWRITE,
                 &oldProtect))
         {
             return false;
         }
 
-        const uint8_t nops[kResetTimePatchLength] = {
+        // 用 6 个 NOP 覆盖 89 83 70 24 00 00
+        const uint8_t nops[6] = {
             0x90, 0x90, 0x90, 0x90, 0x90, 0x90
         };
 
@@ -420,17 +421,17 @@ namespace
         FlushInstructionCache(
             GetCurrentProcess(),
             reinterpret_cast<LPCVOID>(scanAddr),
-            kResetTimePatchLength);
+            sizeof(nops));
 
         DWORD ignoredProtect = 0;
 
-        const bool restored = VirtualProtect(
+        VirtualProtect(
             reinterpret_cast<void*>(scanAddr),
-            kResetTimePatchLength,
+            6,
             oldProtect,
-            &ignoredProtect) != FALSE;
+            &ignoredProtect);
 
-        return restored;
+        return true;
     }
 
     void ThreadLoop()
@@ -446,32 +447,38 @@ namespace
         Sleep(10000);
 
         ConsolePrint(
-            L"[Chainsaw Phial] Scanning for AOB and installing hook...\r\n");
+            L"[Chainsaw Phial] Scanning for AOB and installing hooks...\r\n");
 
         constexpr int kMaxAttempts = 30;
         constexpr DWORD kRetryInterval = 2000;
+
+        bool hookDone = false;
+        bool resetDone = false;
 
         for (int i = 0; i < kMaxAttempts; ++i)
         {
             __try
             {
-                if (SetupHook())
+                if (!resetDone)
                 {
-                    ConsolePrint(
-                        L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
-
                     if (SetupResetTimePatch())
                     {
-                        ConsolePrint(
-                            L"[Chainsaw Phial] Reset time patch applied successfully.\r\n");
-                    }
-                    else
-                    {
-                        ConsolePrint(
-                            L"[Chainsaw Phial] Reset time patch installation failed.\r\n");
-                    }
+                        resetDone = true;
 
-                    return;
+                        ConsolePrint(
+                            L"[Chainsaw Phial] Reset timer patch applied successfully.\r\n");
+                    }
+                }
+
+                if (!hookDone)
+                {
+                    if (SetupHook())
+                    {
+                        hookDone = true;
+
+                        ConsolePrint(
+                            L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
+                    }
                 }
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
@@ -479,12 +486,24 @@ namespace
                 // Silent retry; no file logging.
             }
 
+            if (hookDone && resetDone)
+                return;
+
             if (i + 1 < kMaxAttempts)
                 Sleep(kRetryInterval);
         }
 
-        ConsolePrint(
-            L"[Chainsaw Phial] Hook installation failed after 30 attempts.\r\n");
+        if (!hookDone)
+        {
+            ConsolePrint(
+                L"[Chainsaw Phial] Hook installation failed after 30 attempts.\r\n");
+        }
+
+        if (!resetDone)
+        {
+            ConsolePrint(
+                L"[Chainsaw Phial] Reset timer patch failed after 30 attempts.\r\n");
+        }
 
         g_started.store(false, std::memory_order_release);
     }
