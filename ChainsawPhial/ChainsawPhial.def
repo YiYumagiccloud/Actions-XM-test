@@ -1,0 +1,3 @@
+LIBRARY ChainsawPhial
+EXPORTS
+    Load
