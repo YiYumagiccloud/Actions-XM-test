@@ -1,16 +1,21 @@
 name: 构建 MHW 模组
 
 on:
+  # 纯手动触发
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号 / Tag（例如 v1.0.0，留空则自动使用 v<运行编号>）'
-        required: false
-        default: ''
+        description: '版本号（作为 Release 的 tag，例如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+        type: string
 
 jobs:
   build:
     runs-on: windows-latest
+
+    permissions:
+      contents: write
 
     steps:
     - name: 检出仓库
@@ -36,21 +41,11 @@ jobs:
         name: ChainsawPhial-DLL
         path: output/ChainsawPhial.dll
 
-    - name: 计算发布版本号
-      id: version
-      shell: bash
-      run: |
-        if [ -n "${{ github.event.inputs.version }}" ]; then
-          echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-        else
-          echo "tag=v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-        fi
-
     - name: 自动创建 Release 并上传 DLL
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ steps.version.outputs.tag }}
-        name: ${{ steps.version.outputs.tag }}
+        tag_name: ${{ github.event.inputs.version }}
+        name: MHW ChainsawPhial ${{ github.event.inputs.version }}
         files: output/ChainsawPhial.dll
         generate_release_notes: true
         target_commitish: ${{ github.sha }}
