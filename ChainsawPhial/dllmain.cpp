@@ -1,17 +1,40 @@
 #include <windows.h>
 #include <vector>
 #include <cstdint>
+#include <cstdio>
 
 namespace {
-    // 1. 安全的 AOB 扫描器 (带内存可读性校验)
+    FILE* g_logFile = nullptr;
+
+    // 简单的日志输出函数
+    void Log(const char* format, ...) {
+        if (!g_logFile) return;
+        va_list args;
+        va_start(args, format);
+        vfprintf(g_logFile, format, args);
+        va_end(args);
+        fflush(g_logFile); // 立即写入硬盘，防崩溃丢失
+    }
+
+    void InitLog() {
+        // 将日志保存在 nativePC/plugins 目录下
+        fopen_s(&g_logFile, "nativePC\\plugins\\ChainsawPhial.log", "w");
+        if (g_logFile) {
+            Log("=== Chainsaw Phial Mod Loaded ===\n");
+        }
+    }
+
+    // 安全的 AOB 扫描器
     uintptr_t ScanPattern(const char* moduleName, const std::vector<int>& pattern) {
         uintptr_t moduleBase = (uintptr_t)GetModuleHandleA(moduleName);
-        if (!moduleBase) return 0;
+        if (!moduleBase) {
+            Log("[Error] Module %s not found!\n", moduleName);
+            return 0;
+        }
 
         IMAGE_DOS_HEADER* dosHeader = (IMAGE_DOS_HEADER*)moduleBase;
         IMAGE_NT_HEADERS* ntHeaders = (IMAGE_NT_HEADERS*)(moduleBase + dosHeader->e_lfanew);
         
-        // 只扫描 .text 代码段 (更安全、更快)
         IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(ntHeaders);
         uint8_t* scanStart = nullptr;
         uint8_t* scanEnd = nullptr;
@@ -22,9 +45,13 @@ namespace {
                 break;
             }
         }
-        if (!scanStart) return 0;
+        if (!scanStart) {
+            Log("[Error] .text section not found!\n");
+            return 0;
+        }
 
-        for (uint8_t* p = scanStart; p < scanEnd - pattern.size(); ++p) {
+        // 修复了数组越界漏洞 (<= 而不是 <)
+        for (uint8_t* p = scanStart; p <= scanEnd - pattern.size(); ++p) {
             bool found = true;
             for (size_t i = 0; i < pattern.size(); ++i) {
                 if (pattern[i] != -1 && p[i] != pattern[i]) {
@@ -32,38 +59,43 @@ namespace {
                     break;
                 }
             }
-            if (found) return (uintptr_t)p;
+            if (found) {
+                Log("[Success] Pattern found at: %p\n", p);
+                return (uintptr_t)p;
+            }
         }
         return 0;
     }
 
-    // 2. 在目标地址附近申请内存 (解决 JMP 2GB 限制)
+    // 在目标地址附近分配内存
     uintptr_t AllocNear(uintptr_t target, size_t size) {
-        // 从目标地址向下按 64KB 对齐搜索
         uintptr_t start = target & ~0xFFFF;
-        for (uintptr_t addr = start; addr > start - 0x7FFFFFFF; addr -= 0x10000) {
+        for (uintptr_t addr = start; addr > start - 0x7FFF0000; addr -= 0x10000) {
             MEMORY_BASIC_INFORMATION mbi;
             if (VirtualQuery((LPVOID)addr, &mbi, sizeof(mbi)) == 0) continue;
             
-            // 寻找空闲的、未提交的区域
             if (mbi.State == MEM_FREE) {
                 void* p = VirtualAlloc((LPVOID)addr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
                 if (p) return (uintptr_t)p;
             }
         }
-        return 0; // 如果找不到，返回0
+        // 如果附近找不到，尝试让系统随机分配（虽然极大概率超过2GB，但万一呢）
+        void* p = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        return (uintptr_t)p;
     }
 
     bool SetupHook() {
         std::vector<int> pattern = { 0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72 };
         uintptr_t scanAddr = ScanPattern("MonsterHunterWorld.exe", pattern);
 
-        // 如果没找到，返回 false，让外层重试
         if (!scanAddr) return false; 
 
-        // 使用靠近原地址的申请方式
         uintptr_t caveAddr = AllocNear(scanAddr, 0x1000);
-        if (!caveAddr) return false;
+        if (!caveAddr) {
+            Log("[Error] Failed to allocate memory cave!\n");
+            return false;
+        }
+        Log("[Success] Cave allocated at: %p\n", (void*)caveAddr);
 
         uint8_t code[] = {
             0xF3, 0x0F, 0x10, 0x8B, 0x70, 0x24, 0x00, 0x00, // movss xmm1, [rbx+2470]
@@ -78,11 +110,11 @@ namespace {
         uintptr_t returnAddr = scanAddr + 6;
         uintptr_t jmpAddr = caveAddr + sizeof(code) - 5; 
         
-        // 确保跳转距离在 int32 范围内
         int64_t relativeJump = (int64_t)returnAddr - (int64_t)(jmpAddr + 5);
         if (relativeJump < INT32_MIN || relativeJump > INT32_MAX) {
+            Log("[Error] Jump distance too far! (Over 2GB)\n");
             VirtualFree((LPVOID)caveAddr, 0, MEM_RELEASE);
-            return false; // 距离太远，放弃（理论上 AllocNear 保证不会发生）
+            return false;
         }
         *(int32_t*)&code[sizeof(code) - 4] = (int32_t)relativeJump;
 
@@ -97,33 +129,40 @@ namespace {
             memcpy((void*)scanAddr, jmpPatch, 6);
             VirtualProtect((LPVOID)scanAddr, 6, oldProtect, &oldProtect);
             FlushInstructionCache(GetCurrentProcess(), (LPVOID)scanAddr, 6);
+            Log("[Success] Hook applied successfully!\n");
             return true;
+        } else {
+            Log("[Error] VirtualProtect failed! Error: %lu\n", GetLastError());
         }
         
         VirtualFree((LPVOID)caveAddr, 0, MEM_RELEASE);
         return false;
     }
 
-    // 3. 线程安全与重试机制
     void ThreadLoop() {
-        // 最多尝试 30 次，每次间隔 2 秒 (总共等待约 60 秒)
+        // 如果日志打开失败，不要阻塞游戏
+        if (!g_logFile) return;
+
         for (int i = 0; i < 30; ++i) {
+            Log("[Info] Attempt %d: Scanning memory...\n", i + 1);
             __try {
                 if (SetupHook()) {
-                    // 成功挂载，退出循环
                     return;
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {
-                // 如果扫描或写入时发生崩溃，忽略并重试
+                Log("[Error] Exception caught during SetupHook!\n");
             }
             Sleep(2000);
         }
+        Log("[Error] Timeout. Could not find AOB pattern.\n");
     }
 }
 
 extern "C" __declspec(dllexport) bool Load() {
-    // 使用系统线程池或者直接 CreateThread
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+        InitLog(); // 初始化日志
+        // 等游戏稍微加载一会再开始扫描
+        Sleep(5000);
         ThreadLoop();
         return 0;
     }, nullptr, 0, nullptr);
