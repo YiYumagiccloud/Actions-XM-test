@@ -24,16 +24,17 @@ jobs:
     - name: 配置 MSVC 编译环境
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: 配置 CMake
-      run: cmake -B ${{ github.workspace }}/build -S ${{ github.workspace }}/ChainsawPhial -A x64
-
-    - name: 编译（Release）
-      run: cmake --build ${{ github.workspace }}/build --config Release
+    - name: 编译 DLL
+      shell: cmd
+      run: |
+        if not exist out mkdir out
+        cl /nologo /LD /O2 /EHsc /W3 /MT ChainsawPhial\dllmain.cpp /Fo:out\ /Fe:out\ChainsawPhial.dll /link /DEBUG:NONE
 
     - name: 准备发布文件
+      shell: pwsh
       run: |
-        mkdir output
-        copy build\Release\ChainsawPhial.dll output\
+        New-Item -ItemType Directory -Force output | Out-Null
+        Copy-Item out\ChainsawPhial.dll output\ -Force
 
     - name: 上传构建产物（Artifact）
       uses: actions/upload-artifact@v4
