@@ -10,6 +10,6 @@ add_library(ChainsawPhial SHARED dllmain.cpp)
 
 # 针对 MSVC 的优化（减小体积，去除无用的库链接）
 if(MSVC)
-    target_compile_options(ChainsawPhial PRIVATE /MT /O2 /DNDEBUG)
+    target_compile_options(ChainsawPhial PRIVATE /MT /O2 /DNDEBUG /sdl-)
     set_target_properties(ChainsawPhial PROPERTIES LINK_FLAGS "/SUBSYSTEM:WINDOWS")
 endif()
