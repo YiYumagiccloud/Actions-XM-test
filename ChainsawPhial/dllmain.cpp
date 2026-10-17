@@ -59,33 +59,47 @@ namespace
 
 
     // 输出一条控制台消息，不写入文件。
-    void ConsolePrint(const wchar_t* message)
+void ConsolePrint(const wchar_t* message)
+{
+    if (!message)
+        return;
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+
+    wchar_t line[768]{};
+
+    const int length = swprintf_s(
+        line,
+        _countof(line),
+        L"[ %02u:%02u:%02u ] %s",
+        static_cast<unsigned>(now.wHour),
+        static_cast<unsigned>(now.wMinute),
+        static_cast<unsigned>(now.wSecond),
+        message
+    );
+
+    if (length <= 0)
+        return;
+
+    if (g_consoleOutput != nullptr &&
+        g_consoleOutput != INVALID_HANDLE_VALUE)
     {
-        if (!message)
-            return;
+        DWORD written = 0;
 
-        if (g_consoleOutput != nullptr &&
-            g_consoleOutput != INVALID_HANDLE_VALUE)
+        if (WriteConsoleW(
+                g_consoleOutput,
+                line,
+                static_cast<DWORD>(length),
+                &written,
+                nullptr))
         {
-            DWORD written = 0;
-            const DWORD length =
-                static_cast<DWORD>(lstrlenW(message));
-
-            if (length > 0 &&
-                WriteConsoleW(
-                    g_consoleOutput,
-                    message,
-                    length,
-                    &written,
-                    nullptr))
-            {
-                return;
-            }
+            return;
         }
-
-        // 控制台不可用时退回调试输出，不影响 MOD 本身。
-        OutputDebugStringW(message);
     }
+
+    OutputDebugStringW(line);
+}
 
 
     uintptr_t ScanPattern(
@@ -376,54 +390,49 @@ namespace
     }
 
 
-    void ThreadLoop()
+void ThreadLoop()
+{
+    InitConsole();
+
+    ConsolePrint(
+        L"[Chainsaw Phial] DLL loaded; worker thread started.\r\n");
+
+    ConsolePrint(
+        L"[Chainsaw Phial] Waiting 10 seconds for game initialization...\r\n");
+
+    Sleep(10000);
+
+    ConsolePrint(
+        L"[Chainsaw Phial] Scanning for AOB and installing hook...\r\n");
+
+    constexpr int kMaxAttempts = 30;
+    constexpr DWORD kRetryInterval = 2000;
+
+    for (int i = 0; i < kMaxAttempts; ++i)
     {
-        InitConsole();
-
-        ConsolePrint(
-            L"[Chainsaw Phial] DLL 已加载，后台线程已启动。\r\n");
-
-        ConsolePrint(
-            L"[Chainsaw Phial] 等待游戏初始化（10 秒）...\r\n");
-
-        Sleep(10000);
-
-        ConsolePrint(
-            L"[Chainsaw Phial] 开始查找并安装 Hook。\r\n");
-
-        constexpr int kMaxAttempts = 30;
-        constexpr DWORD kRetryInterval = 2000;
-
-        for (int i = 0; i < kMaxAttempts; ++i)
+        __try
         {
-            __try
+            if (SetupHook())
             {
-                if (SetupHook())
-                {
-                    ConsolePrint(
-                        L"[Chainsaw Phial] Hook 已安装，"
-                        L"目标内存修改成功。\r\n");
+                ConsolePrint(
+                    L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
 
-                    return;
-                }
+                return;
             }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                // 不写文件、不刷屏，保留原版异常保护。
-            }
-
-            if (i + 1 < kMaxAttempts)
-                Sleep(kRetryInterval);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            // Silent retry; no file logging.
         }
 
-        ConsolePrint(
-            L"[Chainsaw Phial] Hook 安装失败："
-            L"多次尝试后仍未成功。\r\n");
-
-        g_started.store(
-            false,
-            std::memory_order_release);
+        if (i + 1 < kMaxAttempts)
+            Sleep(kRetryInterval);
     }
+
+    ConsolePrint(
+        L"[Chainsaw Phial] Hook installation failed after 30 attempts.\r\n");
+
+    g_started.store(false, std::memory_order_release);
 }
 
 
