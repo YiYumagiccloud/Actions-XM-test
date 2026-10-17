@@ -10,14 +10,82 @@
 namespace
 {
     std::atomic_bool g_started{ false };
+    HANDLE g_consoleOutput = INVALID_HANDLE_VALUE;
 
     constexpr size_t kPatchLength = 6;
     constexpr size_t kCaveSize = 0x1000;
 
-    // -1 表示通配符；其余字节精确匹配。
     const std::vector<int> kPattern = {
         0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72
     };
+
+
+    // 初始化控制台，不创建任何日志文件。
+    void InitConsole()
+    {
+        if (!GetConsoleWindow())
+        {
+            if (!AllocConsole())
+            {
+                // 如果无法新建控制台，尝试附加到父进程控制台。
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+        }
+
+        SetConsoleTitleW(L"Chainsaw Phial MOD");
+
+        g_consoleOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+
+        if (g_consoleOutput == nullptr ||
+            g_consoleOutput == INVALID_HANDLE_VALUE)
+        {
+            g_consoleOutput = CreateFileW(
+                L"CONOUT$",
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr);
+
+            if (g_consoleOutput != INVALID_HANDLE_VALUE)
+            {
+                SetStdHandle(
+                    STD_OUTPUT_HANDLE,
+                    g_consoleOutput);
+            }
+        }
+    }
+
+
+    // 输出一条控制台消息，不写入文件。
+    void ConsolePrint(const wchar_t* message)
+    {
+        if (!message)
+            return;
+
+        if (g_consoleOutput != nullptr &&
+            g_consoleOutput != INVALID_HANDLE_VALUE)
+        {
+            DWORD written = 0;
+            const DWORD length =
+                static_cast<DWORD>(lstrlenW(message));
+
+            if (length > 0 &&
+                WriteConsoleW(
+                    g_consoleOutput,
+                    message,
+                    length,
+                    &written,
+                    nullptr))
+            {
+                return;
+            }
+        }
+
+        // 控制台不可用时退回调试输出，不影响 MOD 本身。
+        OutputDebugStringW(message);
+    }
 
 
     uintptr_t ScanPattern(
@@ -73,7 +141,6 @@ namespace
                 reinterpret_cast<const uint8_t*>(
                     moduleBase + section.VirtualAddress);
 
-            // 使用偏移量控制范围，避免指针减法越界。
             for (size_t offset = 0;
                  offset <= textSize - pattern.size();
                  ++offset)
@@ -107,7 +174,7 @@ namespace
     }
 
 
-    // 保留原来的向低地址查找及任意地址回退策略。
+    // 保留已验证有效的内存分配方式。
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
         const uintptr_t start =
@@ -149,7 +216,7 @@ namespace
             addr -= 0x10000;
         }
 
-        // 保留原版的回退方式。
+        // 保留原版回退逻辑。
         void* memory = VirtualAlloc(
             nullptr,
             size,
@@ -177,7 +244,6 @@ namespace
         if (!scanAddr)
             return false;
 
-        // 覆盖 6 字节，回到原条件跳转指令所在的位置。
         const uintptr_t returnAddr =
             scanAddr + kPatchLength;
 
@@ -187,7 +253,7 @@ namespace
         if (!caveAddr)
             return false;
 
-        // 保留 CE 脚本中的汇编逻辑及执行顺序。
+        // 保留原版汇编和 CE 脚本的执行逻辑。
         uint8_t code[] = {
             // movss xmm1, [rbx+2470]
             0xF3, 0x0F, 0x10, 0x8B, 0x70, 0x24, 0x00, 0x00,
@@ -205,7 +271,6 @@ namespace
             0x89, 0x8B, 0x74, 0x23, 0x00, 0x00,
 
             // comiss xmm0, [rbx+2470]
-            // 恢复原逻辑需要的条件标志位
             0x0F, 0x2F, 0x83, 0x70, 0x24, 0x00, 0x00,
 
             // jmp return
@@ -215,7 +280,6 @@ namespace
         static_assert(sizeof(code) == 34,
                       "Unexpected Code Cave size");
 
-        // 计算 Code Cave 返回原程序的 rel32 位移。
         const int64_t returnJump =
             static_cast<int64_t>(returnAddr) -
             static_cast<int64_t>(caveAddr + sizeof(code));
@@ -238,7 +302,6 @@ namespace
             &returnDisplacement,
             sizeof(returnDisplacement));
 
-        // 同时检查 Hook 跳转的距离，避免位移截断。
         const int64_t patchJump =
             static_cast<int64_t>(caveAddr) -
             static_cast<int64_t>(scanAddr + 5);
@@ -256,7 +319,6 @@ namespace
         const int32_t patchDisplacement =
             static_cast<int32_t>(patchJump);
 
-        // 保留原版 Code Cave 的内存保护属性。
         std::memcpy(
             reinterpret_cast<void*>(caveAddr),
             code,
@@ -267,7 +329,6 @@ namespace
             reinterpret_cast<LPCVOID>(caveAddr),
             sizeof(code));
 
-        // E9 rel32 + NOP，与原 CE 脚本覆盖长度一致。
         uint8_t jmpPatch[kPatchLength] = {
             0xE9, 0x00, 0x00, 0x00, 0x00, 0x90
         };
@@ -317,8 +378,18 @@ namespace
 
     void ThreadLoop()
     {
-        // 保留原版延迟，避免过早扫描游戏内存。
+        InitConsole();
+
+        ConsolePrint(
+            L"[Chainsaw Phial] DLL 已加载，后台线程已启动。\r\n");
+
+        ConsolePrint(
+            L"[Chainsaw Phial] 等待游戏初始化（10 秒）...\r\n");
+
         Sleep(10000);
+
+        ConsolePrint(
+            L"[Chainsaw Phial] 开始查找并安装 Hook。\r\n");
 
         constexpr int kMaxAttempts = 30;
         constexpr DWORD kRetryInterval = 2000;
@@ -328,24 +399,35 @@ namespace
             __try
             {
                 if (SetupHook())
+                {
+                    ConsolePrint(
+                        L"[Chainsaw Phial] Hook 已安装，"
+                        L"目标内存修改成功。\r\n");
+
                     return;
+                }
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
-                // 静默捕获异常，保留原来的重试行为。
+                // 不写文件、不刷屏，保留原版异常保护。
             }
 
             if (i + 1 < kMaxAttempts)
                 Sleep(kRetryInterval);
         }
 
-        // 安装失败时允许再次调用 Load() 尝试。
-        g_started.store(false, std::memory_order_release);
+        ConsolePrint(
+            L"[Chainsaw Phial] Hook 安装失败："
+            L"多次尝试后仍未成功。\r\n");
+
+        g_started.store(
+            false,
+            std::memory_order_release);
     }
 }
 
 
-// 保留 Stracker's Loader 所需的 C++ 导出形式。
+// Stracker's Loader 导出入口。
 __declspec(dllexport) bool Load()
 {
     bool expected = false;
@@ -372,7 +454,10 @@ __declspec(dllexport) bool Load()
 
     if (!thread)
     {
-        g_started.store(false, std::memory_order_release);
+        g_started.store(
+            false,
+            std::memory_order_release);
+
         return false;
     }
 
@@ -390,7 +475,7 @@ BOOL APIENTRY DllMain(
     {
         DisableThreadLibraryCalls(hModule);
 
-        // 特意保留原版的启动调用，不改变原来的启动路径。
+        // 保留上一个成功版本的启动行为。
         Load();
     }
 
