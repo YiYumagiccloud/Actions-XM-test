@@ -190,52 +190,95 @@ namespace
         return 0;
     }
 
-    // 优化后的内存分配方式
+    // 保留已验证有效的内存分配方式。（终极双向安全版）
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
-        const uintptr_t start =
-            target & ~static_cast<uintptr_t>(0xFFFF);
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        const uintptr_t granularity = si.dwAllocationGranularity; // 通常是 64KB (0x10000)
 
-        const uintptr_t searchRange =
-            static_cast<uintptr_t>(0x7FFF0000ULL);
+        // 留出一点余量给相对跳转，最大距离设置略小于 2GB
+        const uintptr_t maxDistance = 0x7FFF0000ULL;
+        const uintptr_t lowerBound = target > maxDistance ? target - maxDistance : granularity;
+        const uintptr_t upperBound = target + maxDistance;
 
-        const uintptr_t lowerBound =
-            start > searchRange ? start - searchRange : 0;
-
-        uintptr_t addr = start;
-
+        // ----------------- 1. 向下搜索 -----------------
+        uintptr_t addr = target & ~(granularity - 1);
         while (addr > lowerBound)
         {
             MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0)
+                break;
 
-            if (VirtualQuery(
-                    reinterpret_cast<LPCVOID>(addr),
-                    &mbi,
-                    sizeof(mbi)) != 0)
+            uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            
+            if (mbi.State == MEM_FREE)
             {
-                if (mbi.State == MEM_FREE)
+                // 从区域的末尾往前尝试分配，离目标越近越好
+                uintptr_t regionEnd = regionBase + mbi.RegionSize;
+                uintptr_t allocAddr = (regionEnd - size) & ~(granularity - 1);
+
+                while (allocAddr >= regionBase && allocAddr >= lowerBound)
                 {
                     void* memory = VirtualAlloc(
-                        reinterpret_cast<void*>(addr),
+                        reinterpret_cast<void*>(allocAddr),
                         size,
                         MEM_COMMIT | MEM_RESERVE,
                         PAGE_EXECUTE_READWRITE);
-
                     if (memory)
                         return reinterpret_cast<uintptr_t>(memory);
+                    
+                    if (allocAddr < granularity) break;
+                    allocAddr -= granularity;
                 }
             }
 
-            if (addr < 0x10000)
+            // 越过当前区域，继续向下找
+            if (regionBase >= granularity && regionBase - granularity > lowerBound)
+                addr = regionBase - granularity;
+            else
                 break;
-
-            // 步子迈小一点，4KB 一找，更容易在碎片中抓到空隙
-            // 原本是 0x10000，现在改成 0x1000
-            addr -= 0x1000; 
         }
 
-        // 【关键修改】去掉了 VirtualAlloc(nullptr) 的远端回退！
-        // 如果附近 2GB 找不到，直接返回 0，让外层重试，避免分配无用的极远端内存。
+        // ----------------- 2. 向上搜索 -----------------
+        addr = (target & ~(granularity - 1)) + granularity;
+        while (addr < upperBound)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0)
+                break;
+
+            uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            uintptr_t regionEnd = regionBase + mbi.RegionSize;
+
+            if (mbi.State == MEM_FREE)
+            {
+                // 从区域的开始往后尝试分配，离目标越近越好
+                uintptr_t allocAddr = regionBase;
+                if (allocAddr < addr) allocAddr = addr;
+                allocAddr = (allocAddr + granularity - 1) & ~(granularity - 1);
+
+                while (allocAddr + size <= regionEnd && allocAddr < upperBound)
+                {
+                    void* memory = VirtualAlloc(
+                        reinterpret_cast<void*>(allocAddr),
+                        size,
+                        MEM_COMMIT | MEM_RESERVE,
+                        PAGE_EXECUTE_READWRITE);
+                    if (memory)
+                        return reinterpret_cast<uintptr_t>(memory);
+                    
+                    allocAddr += granularity;
+                }
+            }
+
+            // 越过当前区域，继续向上找
+            if (regionEnd < upperBound && regionEnd > addr)
+                addr = regionEnd;
+            else
+                break;
+        }
+
         return 0;
     }
 
