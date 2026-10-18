@@ -190,7 +190,7 @@ namespace
         return 0;
     }
 
-    // 保留已验证有效的内存分配方式。
+    // 优化后的内存分配方式
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
         const uintptr_t start =
@@ -229,17 +229,14 @@ namespace
             if (addr < 0x10000)
                 break;
 
-            addr -= 0x10000;
+            // 步子迈小一点，4KB 一找，更容易在碎片中抓到空隙
+            // 原本是 0x10000，现在改成 0x1000
+            addr -= 0x1000; 
         }
 
-        // 保留原版回退逻辑。
-        void* memory = VirtualAlloc(
-            nullptr,
-            size,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_READWRITE);
-
-        return reinterpret_cast<uintptr_t>(memory);
+        // 【关键修改】去掉了 VirtualAlloc(nullptr) 的远端回退！
+        // 如果附近 2GB 找不到，直接返回 0，让外层重试，避免分配无用的极远端内存。
+        return 0;
     }
 
     bool FitsRel32(int64_t displacement)
