@@ -496,17 +496,7 @@ namespace
         {
             __try
             {
-                if (!resetDone)
-                {
-                    if (SetupResetTimePatch())
-                    {
-                        resetDone = true;
-
-                        ConsolePrint(
-                            L"[Chainsaw Phial] Reset timer patch applied successfully.\r\n");
-                    }
-                }
-
+                // 1. 【兜底机制】必须先完成主 Hook（增强效果）
                 if (!hookDone)
                 {
                     if (SetupHook())
@@ -515,6 +505,18 @@ namespace
 
                         ConsolePrint(
                             L"[Chainsaw Phial] Hook installed; memory patch applied successfully.\r\n");
+                    }
+                }
+
+                // 2. 只有当主 Hook 100% 成功了，才允许打重置时间的 NOP 补丁
+                if (hookDone && !resetDone)
+                {
+                    if (SetupResetTimePatch())
+                    {
+                        resetDone = true;
+
+                        ConsolePrint(
+                            L"[Chainsaw Phial] Reset timer patch applied successfully.\r\n");
                     }
                 }
             }
@@ -530,14 +532,15 @@ namespace
                 Sleep(kRetryInterval);
         }
 
+        // 如果 30 次重试后依然失败，输出日志
         if (!hookDone)
         {
             ConsolePrint(
-                L"[Chainsaw Phial] Hook installation failed after 30 attempts.\r\n");
+                L"[Chainsaw Phial] Hook installation failed after 30 attempts. Falling back to vanilla behavior (NO patches applied).\r\n");
         }
-
-        if (!resetDone)
+        else if (!resetDone)
         {
+            // 极端情况：Hook 成功了，但改 NOP 失败（正常不会发生）
             ConsolePrint(
                 L"[Chainsaw Phial] Reset timer patch failed after 30 attempts.\r\n");
         }
