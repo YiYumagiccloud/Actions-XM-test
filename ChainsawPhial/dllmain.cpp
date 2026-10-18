@@ -256,7 +256,10 @@ namespace
             ScanPattern("MonsterHunterWorld.exe", kPattern);
 
         if (!scanAddr)
+        {
+            ConsolePrint(L"[Chainsaw Phial] SetupHook failed: Pattern not found.\r\n");
             return false;
+        }
 
         const uintptr_t returnAddr =
             scanAddr + kPatchLength;
@@ -265,34 +268,21 @@ namespace
             AllocNear(scanAddr, kCaveSize);
 
         if (!caveAddr)
+        {
+            ConsolePrint(L"[Chainsaw Phial] SetupHook failed: AllocNear returned 0.\r\n");
             return false;
+        }
 
         // 保留原版汇编和 CE 脚本的执行逻辑。
         uint8_t code[] = {
-            // movss xmm1, [rbx+2470]
             0xF3, 0x0F, 0x10, 0x8B, 0x70, 0x24, 0x00, 0x00,
-
-            // xorps xmm2, xmm2
             0x0F, 0x57, 0xD2,
-
-            // comiss xmm1, xmm2
             0x0F, 0x2F, 0xCA,
-
-            // ja skip_consume
             0x77, 0x06,
-
-            // mov [rbx+2374], ecx
             0x89, 0x8B, 0x74, 0x23, 0x00, 0x00,
-
-            // comiss xmm0, [rbx+2470]
             0x0F, 0x2F, 0x83, 0x70, 0x24, 0x00, 0x00,
-
-            // jmp return
             0xE9, 0x00, 0x00, 0x00, 0x00
         };
-
-        static_assert(sizeof(code) == 34,
-                      "Unexpected Code Cave size");
 
         const int64_t returnJump =
             static_cast<int64_t>(returnAddr) -
@@ -300,11 +290,11 @@ namespace
 
         if (!FitsRel32(returnJump))
         {
-            VirtualFree(
-                reinterpret_cast<void*>(caveAddr),
-                0,
-                MEM_RELEASE);
+            wchar_t msg[128];
+            swprintf_s(msg, L"[Chainsaw Phial] SetupHook failed: returnJump out of range (cave 0x%p).\r\n", reinterpret_cast<void*>(caveAddr));
+            ConsolePrint(msg);
 
+            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
             return false;
         }
 
@@ -322,11 +312,11 @@ namespace
 
         if (!FitsRel32(patchJump))
         {
-            VirtualFree(
-                reinterpret_cast<void*>(caveAddr),
-                0,
-                MEM_RELEASE);
+            wchar_t msg[128];
+            swprintf_s(msg, L"[Chainsaw Phial] SetupHook failed: patchJump out of range (cave 0x%p).\r\n", reinterpret_cast<void*>(caveAddr));
+            ConsolePrint(msg);
 
+            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
             return false;
         }
 
@@ -360,11 +350,8 @@ namespace
                 PAGE_EXECUTE_READWRITE,
                 &oldProtect))
         {
-            VirtualFree(
-                reinterpret_cast<void*>(caveAddr),
-                0,
-                MEM_RELEASE);
-
+            ConsolePrint(L"[Chainsaw Phial] SetupHook failed: VirtualProtect failed.\r\n");
+            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
             return false;
         }
 
