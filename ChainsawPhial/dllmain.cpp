@@ -13,7 +13,7 @@ namespace
     HANDLE g_consoleOutput = INVALID_HANDLE_VALUE;
 
     constexpr size_t kPatchLength = 6;
-    constexpr size_t kCaveSize = 0x100;
+    constexpr size_t kCaveSize = 0x40; // 64字节绝对够了
 
     const std::vector<int> kPattern = {
         0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72
@@ -173,20 +173,18 @@ namespace
         return 0;
     }
 
-    // 终极保底版：如果 VirtualAlloc 分配不到，直接去游戏的 .text 段里找 0xCC 填充区
+    // 终极保底版：如果 VirtualAlloc 分配不到，直接去游戏的 .text 段里找填充区
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
-        // 1. 尝试常规 VirtualAlloc 分配
         SYSTEM_INFO si;
         GetSystemInfo(&si);
         const uintptr_t granularity = si.dwAllocationGranularity; // 64KB
 
-        // 限制搜索范围，通常 +/- 256MB 就足够找内存了，极大加快搜索速度
-        const uintptr_t searchRange = 0x10000000ULL; 
-        const uintptr_t lowerBound = target > searchRange ? target - searchRange : granularity;
-        const uintptr_t upperBound = target + searchRange;
+        const uintptr_t maxDistance = 0x7FFF0000ULL;
+        const uintptr_t lowerBound = target > maxDistance ? target - maxDistance : granularity;
+        const uintptr_t upperBound = target + maxDistance;
 
-        // 向下搜索
+        // 1. 尝试常规 VirtualAlloc 分配（向下搜索）
         uintptr_t addr = target & ~(granularity - 1);
         while (addr > lowerBound)
         {
@@ -211,7 +209,7 @@ namespace
             else break;
         }
 
-        // 向上搜索
+        // 2. 尝试常规 VirtualAlloc 分配（向上搜索）
         addr = (target & ~(granularity - 1)) + granularity;
         while (addr < upperBound)
         {
@@ -239,8 +237,10 @@ namespace
         }
 
         // ==========================================
-        // 2. 终极保底：在 .text 段找连续的 0xCC (int3) 作为 Code Cave
+        // 3. 终极保底：在 .text 段直接找 0xCC 或 0x00 的填充区
         // ==========================================
+        ConsolePrint(L"[Chainsaw Phial] VirtualAlloc failed. Searching for padding in .text section...\r\n");
+
         HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
         if (!module) return 0;
 
@@ -257,13 +257,17 @@ namespace
             const size_t textSize = sections[i].Misc.VirtualSize;
             const uint8_t* text = reinterpret_cast<const uint8_t*>(textBase);
 
-            // 在 .text 里寻找连续的 64 个 0xCC (通常代表函数间的对齐填充)
-            for (size_t offset = 0; offset <= textSize - size; offset += 16) // 16字节步进加速
+            // 遍历寻找连续 64 个相同的填充字节 (0xCC 或 0x00)
+            for (size_t offset = 0; offset <= textSize - size; offset += 16) 
             {
+                const uint8_t firstByte = text[offset];
+                // 只接受这三种常见的编译器填充
+                if (firstByte != 0xCC && firstByte != 0x00 && firstByte != 0x90) continue;
+
                 bool isPadding = true;
-                for (size_t j = 0; j < size; ++j)
+                for (size_t j = 1; j < size; ++j)
                 {
-                    if (text[offset + j] != 0xCC)
+                    if (text[offset + j] != firstByte)
                     {
                         isPadding = false;
                         break;
@@ -273,15 +277,19 @@ namespace
                 if (isPadding)
                 {
                     uintptr_t candidate = textBase + offset;
-                    // 检查距离是否在 2GB 内
+                    // 检查距离是否在 rel32 限制内
                     int64_t dist = static_cast<int64_t>(candidate) - static_cast<int64_t>(target);
                     if (dist >= INT32_MIN && dist <= INT32_MAX)
                     {
                         DWORD oldProtect;
                         if (VirtualProtect(reinterpret_cast<void*>(candidate), size, PAGE_EXECUTE_READWRITE, &oldProtect))
                         {
-                            // 找到了！直接把这个代码洞清理一下返回
                             std::memset(reinterpret_cast<void*>(candidate), 0x90, size);
+                            
+                            wchar_t msg[128];
+                            swprintf_s(msg, L"[Chainsaw Phial] Found Code Cave in .text at: 0x%p\r\n", reinterpret_cast<void*>(candidate));
+                            ConsolePrint(msg);
+                            
                             return candidate;
                         }
                     }
