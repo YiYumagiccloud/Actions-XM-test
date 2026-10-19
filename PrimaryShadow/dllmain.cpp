@@ -576,6 +576,20 @@ namespace
         fclose(f);
     }
 
+    // MSVC C2712：__try 不能和需要对象展开的局部变量放在同一个函数里。
+    // 所以这里单独抽一个只有 bool 局部变量的函数，专门负责 SEH 包裹。
+    bool TryInstallHookSeh()
+    {
+        __try
+        {
+            return SetupPrimaryShadowHook();
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
     // ---------------------------------------------------------
     // 主流程
     // ---------------------------------------------------------
@@ -611,19 +625,13 @@ namespace
         bool hookDone = false;
         for (int i = 0; i < kMaxAttempts && !hookDone; ++i)
         {
-            __try
+            if (TryInstallHookSeh())
             {
-                if (SetupPrimaryShadowHook())
-                {
-                    hookDone = true;
-                }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                // 静默重试
+                hookDone = true;
+                break;
             }
 
-            if (!hookDone && i + 1 < kMaxAttempts)
+            if (i + 1 < kMaxAttempts)
                 Sleep(kRetryInterval);
         }
 
