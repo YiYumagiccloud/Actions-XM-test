@@ -105,72 +105,57 @@ namespace
         OutputDebugStringW(line);
     }
 
+    // 采用开源项目的优化：使用 memchr 进行极速特征码扫描
     uintptr_t ScanPattern(
         const char* moduleName,
         const std::vector<int>& pattern)
     {
-        if (pattern.empty())
-            return 0;
+        if (pattern.empty()) return 0;
 
         HMODULE module = GetModuleHandleA(moduleName);
+        if (!module) return 0;
 
-        if (!module)
+        const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(module);
+        const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
+
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE || dosHeader->e_lfanew <= 0)
             return 0;
 
-        const uintptr_t moduleBase =
-            reinterpret_cast<uintptr_t>(module);
-
-        const auto* dosHeader =
-            reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
-
-        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE ||
-            dosHeader->e_lfanew <= 0)
-        {
-            return 0;
-        }
-
-        const auto* ntHeaders =
-            reinterpret_cast<const IMAGE_NT_HEADERS*>(
-                moduleBase + static_cast<uintptr_t>(
-                    dosHeader->e_lfanew));
+        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+            moduleBase + static_cast<uintptr_t>(dosHeader->e_lfanew));
 
         if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
             return 0;
 
         const auto* sections = IMAGE_FIRST_SECTION(ntHeaders);
 
-        for (WORD i = 0;
-             i < ntHeaders->FileHeader.NumberOfSections;
-             ++i)
+        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
         {
             const auto& section = sections[i];
-
             if (std::memcmp(section.Name, ".text", 5) != 0)
                 continue;
 
-            const size_t textSize =
-                static_cast<size_t>(section.Misc.VirtualSize);
-
+            const size_t textSize = static_cast<size_t>(section.Misc.VirtualSize);
             if (textSize < pattern.size())
                 return 0;
 
-            const auto* text =
-                reinterpret_cast<const uint8_t*>(
-                    moduleBase + section.VirtualAddress);
+            const uint8_t* text = reinterpret_cast<const uint8_t*>(moduleBase + section.VirtualAddress);
+            const uint8_t* textEnd = text + textSize - pattern.size() + 1;
 
-            for (size_t offset = 0;
-                 offset <= textSize - pattern.size();
-                 ++offset)
+            // 提取第一个字节，避免非通配符的首字节
+            const uint8_t firstByte = static_cast<uint8_t>(pattern[0]);
+
+            // 使用 memchr 光速搜索首个字节
+            for (const uint8_t* q = text; q < textEnd; )
             {
-                bool found = true;
+                q = static_cast<const uint8_t*>(std::memchr(q, firstByte, static_cast<size_t>(textEnd - q)));
+                if (!q) break;
 
-                for (size_t j = 0; j < pattern.size(); ++j)
+                bool found = true;
+                // 首字节命中后，再检查剩下的字节
+                for (size_t j = 1; j < pattern.size(); ++j)
                 {
-                    if (pattern[j] != -1 &&
-                        (pattern[j] < 0 ||
-                         pattern[j] > 0xFF ||
-                         text[offset + j] !=
-                             static_cast<uint8_t>(pattern[j])))
+                    if (pattern[j] != -1 && q[j] != static_cast<uint8_t>(pattern[j]))
                     {
                         found = false;
                         break;
@@ -179,14 +164,12 @@ namespace
 
                 if (found)
                 {
-                    return reinterpret_cast<uintptr_t>(
-                        text + offset);
+                    return reinterpret_cast<uintptr_t>(q);
                 }
+                ++q; // 没找到就跳过继续
             }
-
             return 0;
         }
-
         return 0;
     }
 
