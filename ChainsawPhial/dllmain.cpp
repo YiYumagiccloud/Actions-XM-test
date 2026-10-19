@@ -13,7 +13,7 @@ namespace
     HANDLE g_consoleOutput = INVALID_HANDLE_VALUE;
 
     constexpr size_t kPatchLength = 6;
-    constexpr size_t kCaveSize = 0x1000;
+    constexpr size_t kCaveSize = 0x100;
 
     const std::vector<int> kPattern = {
         0x89, 0x8B, 0x74, 0x23, 0x00, 0x00, 0x72
@@ -173,96 +173,123 @@ namespace
         return 0;
     }
 
-    // 保留已验证有效的内存分配方式。（终极双向安全版）
+    // 终极保底版：如果 VirtualAlloc 分配不到，直接去游戏的 .text 段里找 0xCC 填充区
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
+        // 1. 尝试常规 VirtualAlloc 分配
         SYSTEM_INFO si;
         GetSystemInfo(&si);
-        const uintptr_t granularity = si.dwAllocationGranularity; // 通常是 64KB (0x10000)
+        const uintptr_t granularity = si.dwAllocationGranularity; // 64KB
 
-        // 留出一点余量给相对跳转，最大距离设置略小于 2GB
-        const uintptr_t maxDistance = 0x7FFF0000ULL;
-        const uintptr_t lowerBound = target > maxDistance ? target - maxDistance : granularity;
-        const uintptr_t upperBound = target + maxDistance;
+        // 限制搜索范围，通常 +/- 256MB 就足够找内存了，极大加快搜索速度
+        const uintptr_t searchRange = 0x10000000ULL; 
+        const uintptr_t lowerBound = target > searchRange ? target - searchRange : granularity;
+        const uintptr_t upperBound = target + searchRange;
 
-        // ----------------- 1. 向下搜索 -----------------
+        // 向下搜索
         uintptr_t addr = target & ~(granularity - 1);
         while (addr > lowerBound)
         {
             MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0)
-                break;
-
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0) break;
             uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
             
             if (mbi.State == MEM_FREE)
             {
-                // 从区域的末尾往前尝试分配，离目标越近越好
                 uintptr_t regionEnd = regionBase + mbi.RegionSize;
                 uintptr_t allocAddr = (regionEnd - size) & ~(granularity - 1);
-
                 while (allocAddr >= regionBase && allocAddr >= lowerBound)
                 {
-                    void* memory = VirtualAlloc(
-                        reinterpret_cast<void*>(allocAddr),
-                        size,
-                        MEM_COMMIT | MEM_RESERVE,
-                        PAGE_EXECUTE_READWRITE);
-                    if (memory)
-                        return reinterpret_cast<uintptr_t>(memory);
-                    
+                    void* memory = VirtualAlloc(reinterpret_cast<void*>(allocAddr), size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                    if (memory) return reinterpret_cast<uintptr_t>(memory);
                     if (allocAddr < granularity) break;
                     allocAddr -= granularity;
                 }
             }
-
-            // 越过当前区域，继续向下找
             if (regionBase >= granularity && regionBase - granularity > lowerBound)
                 addr = regionBase - granularity;
-            else
-                break;
+            else break;
         }
 
-        // ----------------- 2. 向上搜索 -----------------
+        // 向上搜索
         addr = (target & ~(granularity - 1)) + granularity;
         while (addr < upperBound)
         {
             MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0)
-                break;
-
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0) break;
             uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
             uintptr_t regionEnd = regionBase + mbi.RegionSize;
 
             if (mbi.State == MEM_FREE)
             {
-                // 从区域的开始往后尝试分配，离目标越近越好
                 uintptr_t allocAddr = regionBase;
                 if (allocAddr < addr) allocAddr = addr;
                 allocAddr = (allocAddr + granularity - 1) & ~(granularity - 1);
 
                 while (allocAddr + size <= regionEnd && allocAddr < upperBound)
                 {
-                    void* memory = VirtualAlloc(
-                        reinterpret_cast<void*>(allocAddr),
-                        size,
-                        MEM_COMMIT | MEM_RESERVE,
-                        PAGE_EXECUTE_READWRITE);
-                    if (memory)
-                        return reinterpret_cast<uintptr_t>(memory);
-                    
+                    void* memory = VirtualAlloc(reinterpret_cast<void*>(allocAddr), size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                    if (memory) return reinterpret_cast<uintptr_t>(memory);
                     allocAddr += granularity;
                 }
             }
-
-            // 越过当前区域，继续向上找
             if (regionEnd < upperBound && regionEnd > addr)
                 addr = regionEnd;
-            else
-                break;
+            else break;
         }
 
-        return 0;
+        // ==========================================
+        // 2. 终极保底：在 .text 段找连续的 0xCC (int3) 作为 Code Cave
+        // ==========================================
+        HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
+        if (!module) return 0;
+
+        const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(module);
+        const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
+        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(moduleBase + dosHeader->e_lfanew);
+        const auto* sections = IMAGE_FIRST_SECTION(ntHeaders);
+
+        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
+        {
+            if (std::memcmp(sections[i].Name, ".text", 5) != 0) continue;
+
+            const uintptr_t textBase = moduleBase + sections[i].VirtualAddress;
+            const size_t textSize = sections[i].Misc.VirtualSize;
+            const uint8_t* text = reinterpret_cast<const uint8_t*>(textBase);
+
+            // 在 .text 里寻找连续的 64 个 0xCC (通常代表函数间的对齐填充)
+            for (size_t offset = 0; offset <= textSize - size; offset += 16) // 16字节步进加速
+            {
+                bool isPadding = true;
+                for (size_t j = 0; j < size; ++j)
+                {
+                    if (text[offset + j] != 0xCC)
+                    {
+                        isPadding = false;
+                        break;
+                    }
+                }
+
+                if (isPadding)
+                {
+                    uintptr_t candidate = textBase + offset;
+                    // 检查距离是否在 2GB 内
+                    int64_t dist = static_cast<int64_t>(candidate) - static_cast<int64_t>(target);
+                    if (dist >= INT32_MIN && dist <= INT32_MAX)
+                    {
+                        DWORD oldProtect;
+                        if (VirtualProtect(reinterpret_cast<void*>(candidate), size, PAGE_EXECUTE_READWRITE, &oldProtect))
+                        {
+                            // 找到了！直接把这个代码洞清理一下返回
+                            std::memset(reinterpret_cast<void*>(candidate), 0x90, size);
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+
+        return 0; // 彻底找不到
     }
 
     bool FitsRel32(int64_t displacement)
