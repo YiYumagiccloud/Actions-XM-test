@@ -1,5 +1,4 @@
 #include <windows.h>
-#include <tlhelp32.h>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -11,31 +10,58 @@ namespace
     std::atomic_bool g_started{ false };
     HANDLE g_consoleOutput = INVALID_HANDLE_VALUE;
 
+    // executeJob 的特征码（涵盖函数头）
+    const std::vector<int> kExecuteJobPattern = {
+        0x40, 0x53, 0x55, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x49, 0x8B, 0xE8, 0x44, 0x8B, 0xFA, 0x48, 0x8B, 0xD9, 
+        0x4D, 0x85, 0xC0, 0x74, 0x09, 0x44, 0x89, 0x89, 0xB0, 0x00, 0x00, 0x00, 0xEB, 0x07, 0x44, 0x8B, 0x89, 0xB0, 
+        0x00, 0x00, 0x00
+    };
+
+    // 相机调用点的特征码（用来确认调用者）
     const std::vector<int> kCameraPattern = {
         0x46, 0x8B, 0x8C, 0xB6, 0xB0, 0xDE, 0x3D, 0x00, 0x4E, 0x8B, 0x04, 0xC6, 0x48, 0x8B, 0x0D, -1, -1, -1, -1, 
         0xE8, -1, -1, -1, -1, 0x45, 0x8B, 0xC7, 0x48, 0x8B, 0xD3, 0x48, 0x8B, 0xCD, 0xE8
     };
     constexpr uintptr_t kCallOffset = 19; 
 
-    typedef void(__fastcall* ExecuteJobFn)(uintptr_t smain, int mode, uintptr_t jobs, uint32_t count, uintptr_t extra);
-    ExecuteJobFn OriginalExecuteJob = nullptr;
-
+    uintptr_t g_cameraReturn = 0;
+    uintptr_t g_executeJob = 0;
+    
+    // 跳板与原始指令缓存
+    uintptr_t g_trampoline = 0;
     struct Entry { uint64_t q[4]; };
     Entry g_backup[8192];
 
+    // 裸函数 Hook，处理被覆盖的 5 字节指令
+    __declspec(naked) void HookStub()
+    {
+        __asm {
+            // 执行被覆盖的原始指令：push rbx (40 53)
+            // 注意：kExecuteJobPattern 前两个字节是 40 53
+            // 但为了方便，我们在 C++ 里补全
+        }
+    }
+
+    // 其实直接在 C++ 里写跳转就行，因为 __fastcall 会帮我们保存寄存器
+    typedef void(__fastcall* ExecuteJobFn)(uintptr_t smain, int mode, uintptr_t jobs, uint32_t count, uintptr_t extra);
+    ExecuteJobFn OriginalExecuteJob = nullptr;
+
     void __fastcall HookedExecuteJob(uintptr_t smain, int mode, uintptr_t jobs, uint32_t count, uintptr_t extra)
     {
+        uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+        bool is_camera = (caller == g_cameraReturn);
+        bool modified = false;
         uintptr_t list = jobs;
         uint32_t n = count;
-        
+
         if (!list) {
             list = smain + 0xF0;
             __try { n = *reinterpret_cast<uint32_t*>(smain + 0xB0); } 
             __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
         }
 
-        bool modified = false;
-        if (n > 1 && n <= 8192) {
+        // 只在相机调用且列表有效时反转
+        if (is_camera && n > 1 && n <= 8192) {
             __try {
                 memcpy(g_backup, reinterpret_cast<void*>(list), n * sizeof(Entry));
                 Entry* target = reinterpret_cast<Entry*>(list);
@@ -44,49 +70,16 @@ namespace
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
 
+        // 调用原始函数（如果没改列表，就原样执行）
         OriginalExecuteJob(smain, mode, jobs, count, extra);
 
+        // 恢复列表
         if (modified) {
             __try { memcpy(reinterpret_cast<void*>(list), g_backup, n * sizeof(Entry)); } 
             __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
     }
 
-    // ==========================================
-    // 安全的线程挂起与恢复
-    // ==========================================
-    void SuspendOtherThreads(std::vector<HANDLE>& threads) {
-        DWORD currentThreadId = GetCurrentThreadId();
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (hSnapshot != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 te;
-            te.dwSize = sizeof(te);
-            if (Thread32First(hSnapshot, &te)) {
-                do {
-                    if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != currentThreadId) {
-                        HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-                        if (hThread) {
-                            SuspendThread(hThread);
-                            threads.push_back(hThread);
-                        }
-                    }
-                } while (Thread32Next(hSnapshot, &te));
-            }
-            CloseHandle(hSnapshot);
-        }
-    }
-
-    void ResumeOtherThreads(std::vector<HANDLE>& threads) {
-        for (HANDLE h : threads) {
-            ResumeThread(h);
-            CloseHandle(h);
-        }
-        threads.clear();
-    }
-
-    // ==========================================
-    // 基础功能（已补全返回值的 ScanPattern 和 AllocNear）
-    // ==========================================
     void InitConsole()
     {
         if (!GetConsoleWindow()) { AllocConsole(); }
@@ -191,54 +184,56 @@ namespace
 
     bool SetupJobOrderHook()
     {
-        uintptr_t site = ScanPattern("MonsterHunterWorld.exe", kCameraPattern);
-        if (!site) {
-            ConsolePrint(L"[JobOrder] Failed: Camera pattern not found.");
+        uintptr_t executeSite = ScanPattern("MonsterHunterWorld.exe", kExecuteJobPattern);
+        if (!executeSite) {
+            ConsolePrint(L"[JobOrder] Failed: executeJob pattern not found.");
             return false;
         }
 
-        uintptr_t callSite = site + kCallOffset;
-        
-        if (*(uint8_t*)callSite != 0xE8) {
-            ConsolePrint(L"[JobOrder] Failed: Expected CALL instruction.");
+        uintptr_t cameraSite = ScanPattern("MonsterHunterWorld.exe", kCameraPattern);
+        if (!cameraSite) {
+            ConsolePrint(L"[JobOrder] Failed: camera pattern not found.");
             return false;
         }
 
-        int32_t rel = *(int32_t*)(callSite + 1);
-        OriginalExecuteJob = reinterpret_cast<ExecuteJobFn>(callSite + 5 + rel);
+        g_executeJob = executeSite;
+        g_cameraReturn = cameraSite + kCallOffset + 5; 
 
-        uintptr_t cave = AllocNear(callSite, 0x100);
-        if (!cave) {
+        g_trampoline = AllocNear(executeSite, 0x100);
+        if (!g_trampoline) {
             ConsolePrint(L"[JobOrder] Failed: Code cave allocation failed.");
             return false;
         }
 
-        uint8_t trampoline[] = {
-            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, imm64
-            0xFF, 0xE0                          // jmp rax
+        // 构建跳板：执行被覆盖的原始指令，然后跳回 executeJob + 5
+        // kExecuteJobPattern 前 5 个字节是: 40 53 55 41 57 (push rbx; push rbp; push r15)
+        uint8_t trampCode[] = {
+            0x40, 0x53,                   // push rbx
+            0x55,                         // push rbp
+            0x41, 0x57,                   // push r15
+            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, imm64 (executeJob + 5)
+            0xFF, 0xE0                    // jmp rax
         };
-        memcpy(&trampoline[2], &HookedExecuteJob, 8);
-        memcpy(reinterpret_cast<void*>(cave), trampoline, sizeof(trampoline));
+        uintptr_t returnAddress = executeSite + 5;
+        memcpy(&trampCode[9], &returnAddress, 8);
+        memcpy(reinterpret_cast<void*>(g_trampoline), trampCode, sizeof(trampCode));
+        OriginalExecuteJob = reinterpret_cast<ExecuteJobFn>(g_trampoline);
 
-        // ==========================================
-        // 关键修改：在写游戏代码前暂停所有线程
-        // ==========================================
-        std::vector<HANDLE> threads;
-        SuspendOtherThreads(threads);
+        // 在头部挂钩
+        uint8_t jmpPatch[] = { 0xE9, 0, 0, 0, 0 };
+        int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&HookedExecuteJob) - (executeSite + 5));
+        memcpy(&jmpPatch[1], &rel, 4);
 
         DWORD oldProtect;
-        if (VirtualProtect((void*)callSite, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-            int32_t newRel = static_cast<int32_t>(cave - (callSite + 5));
-            *(int32_t*)(callSite + 1) = newRel;
-            FlushInstructionCache(GetCurrentProcess(), (void*)callSite, 5);
-            VirtualProtect((void*)callSite, 5, oldProtect, &oldProtect);
+        if (!VirtualProtect((void*)executeSite, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            return false;
         }
-
-        // 恢复线程
-        ResumeOtherThreads(threads);
+        memcpy(reinterpret_cast<void*>(executeSite), jmpPatch, 5);
+        FlushInstructionCache(GetCurrentProcess(), (void*)executeSite, 5);
+        VirtualProtect((void*)executeSite, 5, oldProtect, &oldProtect);
 
         wchar_t msg[128];
-        swprintf_s(msg, L"[JobOrder] Hooked camera draw call at: 0x%p", (void*)callSite);
+        swprintf_s(msg, L"[JobOrder] Hooked executeJob at: 0x%p, camera return: 0x%p", (void*)executeSite, (void*)g_cameraReturn);
         ConsolePrint(msg);
         return true;
     }
