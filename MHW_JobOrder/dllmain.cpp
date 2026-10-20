@@ -10,14 +10,12 @@ namespace
     std::atomic_bool g_started{ false };
     HANDLE g_consoleOutput = INVALID_HANDLE_VALUE;
 
-    // executeJob 的特征码（涵盖函数头）
     const std::vector<int> kExecuteJobPattern = {
         0x40, 0x53, 0x55, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x49, 0x8B, 0xE8, 0x44, 0x8B, 0xFA, 0x48, 0x8B, 0xD9, 
         0x4D, 0x85, 0xC0, 0x74, 0x09, 0x44, 0x89, 0x89, 0xB0, 0x00, 0x00, 0x00, 0xEB, 0x07, 0x44, 0x8B, 0x89, 0xB0, 
         0x00, 0x00, 0x00
     };
 
-    // 相机调用点的特征码（用来确认调用者）
     const std::vector<int> kCameraPattern = {
         0x46, 0x8B, 0x8C, 0xB6, 0xB0, 0xDE, 0x3D, 0x00, 0x4E, 0x8B, 0x04, 0xC6, 0x48, 0x8B, 0x0D, -1, -1, -1, -1, 
         0xE8, -1, -1, -1, -1, 0x45, 0x8B, 0xC7, 0x48, 0x8B, 0xD3, 0x48, 0x8B, 0xCD, 0xE8
@@ -25,24 +23,10 @@ namespace
     constexpr uintptr_t kCallOffset = 19; 
 
     uintptr_t g_cameraReturn = 0;
-    uintptr_t g_executeJob = 0;
-    
-    // 跳板与原始指令缓存
     uintptr_t g_trampoline = 0;
     struct Entry { uint64_t q[4]; };
     Entry g_backup[8192];
 
-    // 裸函数 Hook，处理被覆盖的 5 字节指令
-    __declspec(naked) void HookStub()
-    {
-        __asm {
-            // 执行被覆盖的原始指令：push rbx (40 53)
-            // 注意：kExecuteJobPattern 前两个字节是 40 53
-            // 但为了方便，我们在 C++ 里补全
-        }
-    }
-
-    // 其实直接在 C++ 里写跳转就行，因为 __fastcall 会帮我们保存寄存器
     typedef void(__fastcall* ExecuteJobFn)(uintptr_t smain, int mode, uintptr_t jobs, uint32_t count, uintptr_t extra);
     ExecuteJobFn OriginalExecuteJob = nullptr;
 
@@ -60,7 +44,6 @@ namespace
             __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
         }
 
-        // 只在相机调用且列表有效时反转
         if (is_camera && n > 1 && n <= 8192) {
             __try {
                 memcpy(g_backup, reinterpret_cast<void*>(list), n * sizeof(Entry));
@@ -70,10 +53,8 @@ namespace
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
 
-        // 调用原始函数（如果没改列表，就原样执行）
         OriginalExecuteJob(smain, mode, jobs, count, extra);
 
-        // 恢复列表
         if (modified) {
             __try { memcpy(reinterpret_cast<void*>(list), g_backup, n * sizeof(Entry)); } 
             __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -196,22 +177,23 @@ namespace
             return false;
         }
 
-        g_executeJob = executeSite;
         g_cameraReturn = cameraSite + kCallOffset + 5; 
 
+        // 1. 申请跳板 (执行被覆盖的指令并跳回) 和 中转站 (跳向我们的函数)
         g_trampoline = AllocNear(executeSite, 0x100);
-        if (!g_trampoline) {
-            ConsolePrint(L"[JobOrder] Failed: Code cave allocation failed.");
+        uintptr_t cave = AllocNear(executeSite, 0x100);
+        
+        if (!g_trampoline || !cave) {
+            ConsolePrint(L"[JobOrder] Failed: Memory allocation failed.");
             return false;
         }
 
-        // 构建跳板：执行被覆盖的原始指令，然后跳回 executeJob + 5
-        // kExecuteJobPattern 前 5 个字节是: 40 53 55 41 57 (push rbx; push rbp; push r15)
+        // 构建跳板：push rbx; push rbp; push r15; mov rax, executeSite+5; jmp rax
         uint8_t trampCode[] = {
             0x40, 0x53,                   // push rbx
             0x55,                         // push rbp
             0x41, 0x57,                   // push r15
-            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, imm64 (executeJob + 5)
+            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, imm64
             0xFF, 0xE0                    // jmp rax
         };
         uintptr_t returnAddress = executeSite + 5;
@@ -219,9 +201,18 @@ namespace
         memcpy(reinterpret_cast<void*>(g_trampoline), trampCode, sizeof(trampCode));
         OriginalExecuteJob = reinterpret_cast<ExecuteJobFn>(g_trampoline);
 
-        // 在头部挂钩
+        // 构建中转站：mov rax, HookedExecuteJob; jmp rax
+        uint8_t stubCode[] = {
+            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,
+            0xFF, 0xE0
+        };
+        uint64_t hookFunc = reinterpret_cast<uint64_t>(&HookedExecuteJob);
+        memcpy(&stubCode[2], &hookFunc, 8);
+        memcpy(reinterpret_cast<void*>(cave), stubCode, sizeof(stubCode));
+
+        // 在函数头部写入 jmp 到 cave
         uint8_t jmpPatch[] = { 0xE9, 0, 0, 0, 0 };
-        int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&HookedExecuteJob) - (executeSite + 5));
+        int32_t rel = static_cast<int32_t>(cave - (executeSite + 5));
         memcpy(&jmpPatch[1], &rel, 4);
 
         DWORD oldProtect;
