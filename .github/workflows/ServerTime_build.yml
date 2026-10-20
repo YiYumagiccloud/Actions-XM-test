@@ -1,4 +1,4 @@
-name: 构建 MHW JobOrder 模组
+name: 构建 MHW ServerTime 模组
 
 on:
   # 纯手动触发
@@ -28,26 +28,26 @@ jobs:
       shell: cmd
       run: |
         if not exist out mkdir out
-        cl /nologo /LD /O2 /EHsc /W3 /MT MHW_JobOrder/dllmain.cpp /Fo:out\ /Fe:out\MHW_JobOrder.dll /link /DEBUG:NONE
+        cl /nologo /LD /O2 /EHsc /W3 /MT MHW_ServerTime/dllmain.cpp /Fo:out\ /Fe:out\MHW_ServerTime.dll /link /DEBUG:NONE
 
     - name: 准备发布文件
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force output | Out-Null
-        Copy-Item out\MHW_JobOrder.dll output\ -Force
+        Copy-Item out\MHW_ServerTime.dll output\ -Force
 
     - name: 上传构建产物（Artifact）
       uses: actions/upload-artifact@v4
       with:
-        name: MHW_JobOrder-DLL
-        path: output/MHW_JobOrder.dll
+        name: MHW_ServerTime-DLL
+        path: output/MHW_ServerTime.dll
 
     - name: 自动创建 Release 并上传 DLL
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event.inputs.version }}
-        name: MHW JobOrder ${{ github.event.inputs.version }}
-        files: output/MHW_JobOrder.dll
+        name: MHW ServerTime ${{ github.event.inputs.version }}
+        files: output/MHW_ServerTime.dll
         generate_release_notes: true
         target_commitish: ${{ github.sha }}
       env:
