@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <tlhelp32.h>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -10,7 +11,6 @@ namespace
     std::atomic_bool g_started{ false };
     HANDLE g_consoleOutput = INVALID_HANDLE_VALUE;
 
-    // 特征码：相机绘制 round 的调用点
     const std::vector<int> kCameraPattern = {
         0x46, 0x8B, 0x8C, 0xB6, 0xB0, 0xDE, 0x3D, 0x00, 0x4E, 0x8B, 0x04, 0xC6, 0x48, 0x8B, 0x0D, -1, -1, -1, -1, 
         0xE8, -1, -1, -1, -1, 0x45, 0x8B, 0xC7, 0x48, 0x8B, 0xD3, 0x48, 0x8B, 0xCD, 0xE8
@@ -23,9 +23,6 @@ namespace
     struct Entry { uint64_t q[4]; };
     Entry g_backup[8192];
 
-    // ==========================================
-    // 核心 Hook 函数
-    // ==========================================
     void __fastcall HookedExecuteJob(uintptr_t smain, int mode, uintptr_t jobs, uint32_t count, uintptr_t extra)
     {
         uintptr_t list = jobs;
@@ -42,16 +39,13 @@ namespace
             __try {
                 memcpy(g_backup, reinterpret_cast<void*>(list), n * sizeof(Entry));
                 Entry* target = reinterpret_cast<Entry*>(list);
-                // 反转列表：让耗时最长的 job 最先被派发
                 for (uint32_t i = 0; i < n; ++i) target[i] = g_backup[n - 1 - i];
                 modified = true;
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
 
-        // 调用原始函数
         OriginalExecuteJob(smain, mode, jobs, count, extra);
 
-        // 恢复列表，不破坏游戏原有的数据结构
         if (modified) {
             __try { memcpy(reinterpret_cast<void*>(list), g_backup, n * sizeof(Entry)); } 
             __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -59,7 +53,39 @@ namespace
     }
 
     // ==========================================
-    // 基础设施
+    // 安全的线程挂起与恢复
+    // ==========================================
+    void SuspendOtherThreads(std::vector<HANDLE>& threads) {
+        DWORD currentThreadId = GetCurrentThreadId();
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (hSnapshot != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 te;
+            te.dwSize = sizeof(te);
+            if (Thread32First(hSnapshot, &te)) {
+                do {
+                    if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != currentThreadId) {
+                        HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                        if (hThread) {
+                            SuspendThread(hThread);
+                            threads.push_back(hThread);
+                        }
+                    }
+                } while (Thread32Next(hSnapshot, &te));
+            }
+            CloseHandle(hSnapshot);
+        }
+    }
+
+    void ResumeOtherThreads(std::vector<HANDLE>& threads) {
+        for (HANDLE h : threads) {
+            ResumeThread(h);
+            CloseHandle(h);
+        }
+        threads.clear();
+    }
+
+    // ==========================================
+    // 基础功能（已补全返回值的 ScanPattern 和 AllocNear）
     // ==========================================
     void InitConsole()
     {
@@ -95,7 +121,6 @@ namespace
         if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return 0;
 
         const auto* sections = IMAGE_FIRST_SECTION(ntHeaders);
-
         for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
         {
             const auto& section = sections[i];
@@ -188,22 +213,29 @@ namespace
             return false;
         }
 
-        // 生成极简跳板：mov rax, imm64; jmp rax
         uint8_t trampoline[] = {
-            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 
-            0xFF, 0xE0                          
+            0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, imm64
+            0xFF, 0xE0                          // jmp rax
         };
         memcpy(&trampoline[2], &HookedExecuteJob, 8);
         memcpy(reinterpret_cast<void*>(cave), trampoline, sizeof(trampoline));
 
-        DWORD oldProtect;
-        if (!VirtualProtect((void*)callSite, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) return false;
+        // ==========================================
+        // 关键修改：在写游戏代码前暂停所有线程
+        // ==========================================
+        std::vector<HANDLE> threads;
+        SuspendOtherThreads(threads);
 
-        int32_t newRel = static_cast<int32_t>(cave - (callSite + 5));
-        *(int32_t*)(callSite + 1) = newRel;
-        
-        FlushInstructionCache(GetCurrentProcess(), (void*)callSite, 5);
-        VirtualProtect((void*)callSite, 5, oldProtect, &oldProtect);
+        DWORD oldProtect;
+        if (VirtualProtect((void*)callSite, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            int32_t newRel = static_cast<int32_t>(cave - (callSite + 5));
+            *(int32_t*)(callSite + 1) = newRel;
+            FlushInstructionCache(GetCurrentProcess(), (void*)callSite, 5);
+            VirtualProtect((void*)callSite, 5, oldProtect, &oldProtect);
+        }
+
+        // 恢复线程
+        ResumeOtherThreads(threads);
 
         wchar_t msg[128];
         swprintf_s(msg, L"[JobOrder] Hooked camera draw call at: 0x%p", (void*)callSite);
