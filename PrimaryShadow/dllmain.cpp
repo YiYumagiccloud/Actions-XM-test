@@ -24,15 +24,15 @@ namespace
     };
     constexpr int kCSystemCtorOffset = -19;
 
-    constexpr size_t kPatchLength = 5;
+    // 实际 prologue 是 40 53 48 83 EC XX（6 字节），覆盖 6 字节后跳回 ctor+6
+    constexpr size_t kPatchLength = 6;
     constexpr size_t kCaveSize = 0x100;
 
     // sVolumeRenderer + 0x38 是 bool
     constexpr uintptr_t kVolumeRendererEnabledOffset = 0x38;
 
-    // 单例记录上限。MT Framework 单例数量远小于这个值。
+    // 单例记录上限
     constexpr size_t kMaxSingletons = 4096;
-
     void* g_singletons[kMaxSingletons] = {};
     std::atomic<size_t> g_singletonCount{ 0 };
 
@@ -279,7 +279,7 @@ namespace
 
     // ---------------------------------------------------------
     // cSystem::Ctor 的 cave 入口会被调用到这里
-    // 注意：这个函数运行在游戏线程，必须简单、无异常、无分配。
+    // 运行在游戏线程，必须简单、无异常、无分配。
     // ---------------------------------------------------------
     extern "C" void RecordSingleton(void* thisPtr)
     {
@@ -402,17 +402,18 @@ namespace
         Log("cSystem:Ctor at 0x%p (pattern 0x%p)",
             reinterpret_cast<void*>(ctorAddr), reinterpret_cast<void*>(scanAddr));
 
-        // 检查入口第一条指令是否为 48 89 5C 24 XX
+        // 预期入口: 40 53 48 83 EC XX  (push rbx; sub rsp, imm8)
         const uint8_t* entry = reinterpret_cast<const uint8_t*>(ctorAddr);
-        if (entry[0] != 0x48 || entry[1] != 0x89 || entry[2] != 0x5C || entry[3] != 0x24)
+        if (entry[0] != 0x40 || entry[1] != 0x53 ||
+            entry[2] != 0x48 || entry[3] != 0x83 || entry[4] != 0xEC)
         {
             Log("unexpected prologue at cSystem:Ctor: %02X %02X %02X %02X %02X",
                 entry[0], entry[1], entry[2], entry[3], entry[4]);
             return false;
         }
 
-        const uint8_t stackOff = entry[4];
-        Log("entry prologue: 48 89 5C 24 %02X", stackOff);
+        const uint8_t stackSub = entry[5];
+        Log("entry prologue: 40 53 48 83 EC %02X (sub rsp, 0x%02X)", stackSub, stackSub);
 
         const uintptr_t returnAddr = ctorAddr + kPatchLength;
         const uintptr_t caveAddr = AllocNear(ctorAddr, kCaveSize);
@@ -425,16 +426,13 @@ namespace
         uint8_t code[0x80] = {};
         size_t p = 0;
 
-        // 原指令: mov [rsp+XX], rbx
-        code[p++] = 0x48;
-        code[p++] = 0x89;
-        code[p++] = 0x5C;
-        code[p++] = 0x24;
-        code[p++] = stackOff;
+        // 重放被覆盖的 prologue: push rbx; sub rsp, XX
+        code[p++] = 0x40; code[p++] = 0x53;
+        code[p++] = 0x48; code[p++] = 0x83; code[p++] = 0xEC; code[p++] = stackSub;
 
-        // push rax, rcx, rdx, r8, r9, r10, r11
+        // 保存 volatile 寄存器
         code[p++] = 0x50;                               // push rax
-        code[p++] = 0x51;                               // push rcx
+        code[p++] = 0x51;                               // push rcx (this)
         code[p++] = 0x52;                               // push rdx
         code[p++] = 0x41; code[p++] = 0x50;             // push r8
         code[p++] = 0x41; code[p++] = 0x51;             // push r9
@@ -448,11 +446,11 @@ namespace
         std::memcpy(&code[p], &fnAddr, 8);
         p += 8;
 
-        // call rax
+        // call rax  (rcx 仍为 this)
         code[p++] = 0xFF;
         code[p++] = 0xD0;
 
-        // pop r11, r10, r9, r8, rdx, rcx, rax
+        // 恢复 volatile 寄存器
         code[p++] = 0x41; code[p++] = 0x5B;             // pop r11
         code[p++] = 0x41; code[p++] = 0x5A;             // pop r10
         code[p++] = 0x41; code[p++] = 0x59;             // pop r9
@@ -486,7 +484,7 @@ namespace
             reinterpret_cast<LPCVOID>(caveAddr),
             p);
 
-        // Patch 入口
+        // Patch 前 6 字节: E9 rel32 90
         const int64_t patchDisp =
             static_cast<int64_t>(caveAddr) -
             static_cast<int64_t>(ctorAddr + 5);
@@ -499,7 +497,7 @@ namespace
         }
         int32_t patchDisp32 = static_cast<int32_t>(patchDisp);
 
-        uint8_t jmpPatch[kPatchLength] = { 0xE9 };
+        uint8_t jmpPatch[kPatchLength] = { 0xE9, 0, 0, 0, 0, 0x90 };
         std::memcpy(&jmpPatch[1], &patchDisp32, 4);
 
         DWORD oldProtect = 0;
@@ -590,7 +588,8 @@ namespace
     // ---------------------------------------------------------
     struct Settings
     {
-        int volumeRendering = -1;  // -1 = 不修改, 0 = 强制关闭, 1 = 强制开启
+        int volumeRendering = -1;          // -1 = 不修改, 0 = 强制关闭, 1 = 强制开启
+        uintptr_t volumeRendererAddress = 0; // 手动兜底
     };
 
     bool TryParseInt(const wchar_t* s, int& out)
@@ -614,10 +613,21 @@ namespace
         return TryParseInt(buf, v) ? v : def;
     }
 
+    uintptr_t ReadUIntPtr(const wchar_t* section, const wchar_t* key, uintptr_t def, const wchar_t* file)
+    {
+        wchar_t buf[64] = {};
+        GetPrivateProfileStringW(section, key, L"", buf, _countof(buf), file);
+        if (buf[0] == 0) return def;
+        wchar_t* end = nullptr;
+        unsigned long long v = wcstoull(buf, &end, 0); // 0 自动识别 0x 前缀
+        return end == buf ? def : static_cast<uintptr_t>(v);
+    }
+
     Settings LoadSettings(const std::wstring& path)
     {
         Settings s;
         s.volumeRendering = ReadInt(L"Settings", L"VolumeRendering", -1, path.c_str());
+        s.volumeRendererAddress = ReadUIntPtr(L"Settings", L"VolumeRendererAddress", 0, path.c_str());
         return s;
     }
 
@@ -633,6 +643,15 @@ namespace
     void ApplyVolumeRendering(const Settings& s)
     {
         void* vr = g_volumeRenderer.load(std::memory_order_acquire);
+
+        if (!vr && s.volumeRendererAddress)
+        {
+            vr = reinterpret_cast<void*>(s.volumeRendererAddress);
+            g_volumeRenderer.store(vr, std::memory_order_release);
+            Log("using manual VolumeRenderer address 0x%p",
+                reinterpret_cast<void*>(s.volumeRendererAddress));
+        }
+
         if (!vr) return;
         if (s.volumeRendering < 0) return;
 
@@ -641,7 +660,8 @@ namespace
 
         if (!TryWriteBool(addr, enabled))
         {
-            Log("failed to write volume renderer at 0x%p, will retry", reinterpret_cast<void*>(addr));
+            Log("failed to write volume renderer at 0x%p, will retry",
+                reinterpret_cast<void*>(addr));
             g_volumeRenderer.store(nullptr, std::memory_order_release);
         }
     }
@@ -662,7 +682,11 @@ namespace
             "; -1 = 不修改（游戏内设置生效）\r\n"
             ";  0 = 强制关闭体积雾（包括瘴气谷）\r\n"
             ";  1 = 强制开启\r\n"
-            "VolumeRendering=-1\r\n",
+            "VolumeRendering=-1\r\n"
+            "\r\n"
+            "; 兜底：如果自动找不到 sVolumeRenderer，可以在这里手填对象地址（十六进制，0x 开头）。\r\n"
+            "; 留 0 表示自动查找。\r\n"
+            "VolumeRendererAddress=0\r\n",
             f);
         fclose(f);
     }
@@ -688,14 +712,15 @@ namespace
 
         Settings settings = LoadSettings(g_iniPath);
         g_iniWriteTime = GetFileWriteTime(g_iniPath);
-        Log("initial: VolumeRendering=%d", settings.volumeRendering);
+        Log("initial: VolumeRendering=%d, VolumeRendererAddress=0x%p",
+            settings.volumeRendering,
+            reinterpret_cast<void*>(settings.volumeRendererAddress));
 
-        Log("waiting 5s for game init...");
-        Sleep(5000);
+        Log("waiting 300ms for game init...");
+        Sleep(300);
 
-        // 安装 cSystem::Ctor Hook
-        constexpr int kMaxHookAttempts = 30;
-        constexpr DWORD kHookRetryInterval = 1000;
+        constexpr int kMaxHookAttempts = 60;
+        constexpr DWORD kHookRetryInterval = 300;
         bool hookDone = false;
         for (int i = 0; i < kMaxHookAttempts && !hookDone; ++i)
         {
@@ -717,6 +742,7 @@ namespace
 
         // 等所有单例构造完成
         Sleep(10000);
+        Log("recorded %zu singletons so far", g_singletonCount.load(std::memory_order_acquire));
 
         // 查找 sVolumeRenderer
         constexpr int kMaxFindAttempts = 30;
@@ -768,10 +794,17 @@ namespace
                 {
                     g_iniWriteTime = ft;
                     Settings updated = LoadSettings(g_iniPath);
-                    if (updated.volumeRendering != settings.volumeRendering)
+                    if (updated.volumeRendering != settings.volumeRendering ||
+                        updated.volumeRendererAddress != settings.volumeRendererAddress)
                     {
                         settings = updated;
-                        Log("reloaded: VolumeRendering=%d", settings.volumeRendering);
+                        if (settings.volumeRendererAddress)
+                            g_volumeRenderer.store(
+                                reinterpret_cast<void*>(settings.volumeRendererAddress),
+                                std::memory_order_release);
+                        Log("reloaded: VolumeRendering=%d, VolumeRendererAddress=0x%p",
+                            settings.volumeRendering,
+                            reinterpret_cast<void*>(settings.volumeRendererAddress));
                     }
                 }
             }
