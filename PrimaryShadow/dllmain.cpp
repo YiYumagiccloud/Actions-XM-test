@@ -15,8 +15,6 @@ namespace
     std::atomic_bool g_started{ false };
     HMODULE g_hModule = nullptr;
 
-    // cSystem:Ctor 的 Pattern（来自 AddressRecords.json）
-    // 匹配到的是 "48 83 C1 08 ..." 这条，函数入口在匹配位置 - 19 字节。
     const std::vector<int> kCSystemCtorPattern = {
         0x48, 0x83, 0xC1, 0x08, 0xFF, 0x15, -1, -1, -1, -1,
         0x48, 0x8B, 0xC3, 0xC6, 0x43, 0x30, 0x01,
@@ -24,19 +22,17 @@ namespace
     };
     constexpr int kCSystemCtorOffset = -19;
 
-    // 实际 prologue 是 40 53 48 83 EC XX（6 字节），覆盖 6 字节后跳回 ctor+6
-    constexpr size_t kPatchLength = 6;
+    constexpr size_t kPatchLength = 6; // 40 53 48 83 EC XX
     constexpr size_t kCaveSize = 0x100;
 
-    // sVolumeRenderer + 0x38 是 bool
     constexpr uintptr_t kVolumeRendererEnabledOffset = 0x38;
 
-    // 单例记录上限
-    constexpr size_t kMaxSingletons = 4096;
+    constexpr size_t kMaxSingletons = 8192; // 加大容量
     void* g_singletons[kMaxSingletons] = {};
     std::atomic<size_t> g_singletonCount{ 0 };
 
     std::atomic<void*> g_volumeRenderer{ nullptr };
+    uintptr_t g_manualVolumeRendererAddr = 0;
 
     uintptr_t g_cSystemCtorAddr = 0;
     uintptr_t g_cSystemCtorCave = 0;
@@ -46,9 +42,6 @@ namespace
     FILETIME g_iniWriteTime{};
     FILE* g_logFile = nullptr;
 
-    // ---------------------------------------------------------
-    // 日志
-    // ---------------------------------------------------------
     void Log(const char* fmt, ...)
     {
         char body[1024] = {};
@@ -62,12 +55,9 @@ namespace
 
         char line[1280] = {};
         sprintf_s(
-            line,
-            _countof(line),
+            line, _countof(line),
             "[PrimaryShadow %02u:%02u:%02u] %s\r\n",
-            static_cast<unsigned>(now.wHour),
-            static_cast<unsigned>(now.wMinute),
-            static_cast<unsigned>(now.wSecond),
+            (unsigned)now.wHour, (unsigned)now.wMinute, (unsigned)now.wSecond,
             body);
 
         OutputDebugStringA(line);
@@ -79,67 +69,48 @@ namespace
         }
     }
 
-    // ---------------------------------------------------------
-    // 特征码扫描
-    // ---------------------------------------------------------
-    uintptr_t ScanPattern(
-        const char* moduleName,
-        const std::vector<int>& pattern)
+    uintptr_t ScanPattern(const char* moduleName, const std::vector<int>& pattern)
     {
         if (pattern.empty()) return 0;
-
         HMODULE module = GetModuleHandleA(moduleName);
         if (!module) return 0;
 
         const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(module);
         const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE || dosHeader->e_lfanew <= 0) return 0;
 
-        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE || dosHeader->e_lfanew <= 0)
-            return 0;
-
-        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-            moduleBase + static_cast<uintptr_t>(dosHeader->e_lfanew));
-
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
-            return 0;
+        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(moduleBase + (uintptr_t)dosHeader->e_lfanew);
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return 0;
 
         const auto* sections = IMAGE_FIRST_SECTION(ntHeaders);
-
         for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
         {
             const auto& section = sections[i];
-            if (std::memcmp(section.Name, ".text", 5) != 0)
-                continue;
+            if (std::memcmp(section.Name, ".text", 5) != 0) continue;
 
-            const size_t textSize = static_cast<size_t>(section.Misc.VirtualSize);
-            if (textSize < pattern.size())
-                return 0;
+            const size_t textSize = (size_t)section.Misc.VirtualSize;
+            if (textSize < pattern.size()) return 0;
 
-            const uint8_t* text = reinterpret_cast<const uint8_t*>(
-                moduleBase + section.VirtualAddress);
+            const uint8_t* text = reinterpret_cast<const uint8_t*>(moduleBase + section.VirtualAddress);
             const uint8_t* textEnd = text + textSize - pattern.size() + 1;
-
-            const uint8_t firstByte = static_cast<uint8_t>(pattern[0]);
+            const uint8_t firstByte = (uint8_t)pattern[0];
 
             for (const uint8_t* q = text; q < textEnd;)
             {
-                q = static_cast<const uint8_t*>(
-                    std::memchr(q, firstByte, static_cast<size_t>(textEnd - q)));
+                q = (const uint8_t*)std::memchr(q, firstByte, (size_t)(textEnd - q));
                 if (!q) break;
 
                 bool found = true;
                 for (size_t j = 1; j < pattern.size(); ++j)
                 {
-                    if (pattern[j] != -1 && q[j] != static_cast<uint8_t>(pattern[j]))
+                    if (pattern[j] != -1 && q[j] != (uint8_t)pattern[j])
                     {
                         found = false;
                         break;
                     }
                 }
 
-                if (found)
-                    return reinterpret_cast<uintptr_t>(q);
-
+                if (found) return reinterpret_cast<uintptr_t>(q);
                 ++q;
             }
             return 0;
@@ -147,15 +118,10 @@ namespace
         return 0;
     }
 
-    // ---------------------------------------------------------
-    // Code cave 分配
-    // ---------------------------------------------------------
     uintptr_t AllocNear(uintptr_t target, size_t size)
     {
-        SYSTEM_INFO si;
-        GetSystemInfo(&si);
+        SYSTEM_INFO si; GetSystemInfo(&si);
         const uintptr_t granularity = si.dwAllocationGranularity;
-
         const uintptr_t searchRange = 0x10000000ULL;
         const uintptr_t lowerBound = target > searchRange ? target - searchRange : granularity;
         const uintptr_t upperBound = target + searchRange;
@@ -164,21 +130,16 @@ namespace
         while (addr > lowerBound)
         {
             MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0) break;
-            uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-
+            if (VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi)) == 0) break;
+            uintptr_t regionBase = (uintptr_t)mbi.BaseAddress;
             if (mbi.State == MEM_FREE)
             {
                 uintptr_t regionEnd = regionBase + mbi.RegionSize;
                 uintptr_t allocAddr = (regionEnd - size) & ~(granularity - 1);
                 while (allocAddr >= regionBase && allocAddr >= lowerBound)
                 {
-                    void* memory = VirtualAlloc(
-                        reinterpret_cast<void*>(allocAddr),
-                        size,
-                        MEM_COMMIT | MEM_RESERVE,
-                        PAGE_EXECUTE_READWRITE);
-                    if (memory) return reinterpret_cast<uintptr_t>(memory);
+                    void* memory = VirtualAlloc((void*)allocAddr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                    if (memory) return (uintptr_t)memory;
                     if (allocAddr < granularity) break;
                     allocAddr -= granularity;
                 }
@@ -192,95 +153,26 @@ namespace
         while (addr < upperBound)
         {
             MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0) break;
-            uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi)) == 0) break;
+            uintptr_t regionBase = (uintptr_t)mbi.BaseAddress;
             uintptr_t regionEnd = regionBase + mbi.RegionSize;
-
             if (mbi.State == MEM_FREE)
             {
-                uintptr_t allocAddr = regionBase;
-                if (allocAddr < addr) allocAddr = addr;
+                uintptr_t allocAddr = regionBase < addr ? addr : regionBase;
                 allocAddr = (allocAddr + granularity - 1) & ~(granularity - 1);
-
                 while (allocAddr + size <= regionEnd && allocAddr < upperBound)
                 {
-                    void* memory = VirtualAlloc(
-                        reinterpret_cast<void*>(allocAddr),
-                        size,
-                        MEM_COMMIT | MEM_RESERVE,
-                        PAGE_EXECUTE_READWRITE);
-                    if (memory) return reinterpret_cast<uintptr_t>(memory);
+                    void* memory = VirtualAlloc((void*)allocAddr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                    if (memory) return (uintptr_t)memory;
                     allocAddr += granularity;
                 }
             }
-            if (regionEnd < upperBound && regionEnd > addr)
-                addr = regionEnd;
+            if (regionEnd < upperBound && regionEnd > addr) addr = regionEnd;
             else break;
         }
-
-        HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
-        if (!module) return 0;
-
-        const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(module);
-        const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
-        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-            moduleBase + dosHeader->e_lfanew);
-        const auto* sections = IMAGE_FIRST_SECTION(ntHeaders);
-
-        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
-        {
-            if (std::memcmp(sections[i].Name, ".text", 5) != 0) continue;
-
-            const uintptr_t textBase = moduleBase + sections[i].VirtualAddress;
-            const size_t textSize = sections[i].Misc.VirtualSize;
-            const uint8_t* text = reinterpret_cast<const uint8_t*>(textBase);
-
-            for (size_t offset = 0; offset + size <= textSize; offset += 16)
-            {
-                bool isPadding = true;
-                for (size_t j = 0; j < size; ++j)
-                {
-                    if (text[offset + j] != 0xCC)
-                    {
-                        isPadding = false;
-                        break;
-                    }
-                }
-
-                if (isPadding)
-                {
-                    uintptr_t candidate = textBase + offset;
-                    int64_t dist = static_cast<int64_t>(candidate) - static_cast<int64_t>(target);
-                    if (dist >= INT32_MIN && dist <= INT32_MAX)
-                    {
-                        DWORD oldProtect;
-                        if (VirtualProtect(
-                                reinterpret_cast<void*>(candidate),
-                                size,
-                                PAGE_EXECUTE_READWRITE,
-                                &oldProtect))
-                        {
-                            std::memset(reinterpret_cast<void*>(candidate), 0x90, size);
-                            return candidate;
-                        }
-                    }
-                }
-            }
-        }
-
         return 0;
     }
 
-    bool FitsRel32(int64_t displacement)
-    {
-        return displacement >= (std::numeric_limits<int32_t>::min)()
-            && displacement <= (std::numeric_limits<int32_t>::max)();
-    }
-
-    // ---------------------------------------------------------
-    // cSystem::Ctor 的 cave 入口会被调用到这里
-    // 运行在游戏线程，必须简单、无异常、无分配。
-    // ---------------------------------------------------------
     extern "C" void RecordSingleton(void* thisPtr)
     {
         const size_t idx = g_singletonCount.fetch_add(1, std::memory_order_acq_rel);
@@ -290,35 +182,19 @@ namespace
         }
     }
 
-    // ---------------------------------------------------------
-    // SEH 辅助（都只有标量局部变量，避免 C2712）
-    // ---------------------------------------------------------
     bool TryReadU64(uintptr_t addr, uint64_t& out)
     {
-        __try
-        {
-            out = *reinterpret_cast<uint64_t*>(addr);
-            return true;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            return false;
-        }
+        __try { out = *reinterpret_cast<uint64_t*>(addr); return true; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
     bool IsReadableString(uintptr_t addr)
     {
         __try
         {
-            const char* p = reinterpret_cast<const char*>(addr);
+            const char* p = (const char*)addr;
             char c = p[0];
-            // DTI 名字可能以 s/c/Mt/Mh 等开头，放宽首字符限制。
-            if (!((c >= 'a' && c <= 'z') ||
-                  (c >= 'A' && c <= 'Z') ||
-                  c == '_'))
-            {
-                return false;
-            }
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')) return false;
             for (int i = 1; i < 128; i++)
             {
                 char ch = p[i];
@@ -327,10 +203,7 @@ namespace
             }
             return false;
         }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            return false;
-        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
     void* GetDtiSafe(void* inst)
@@ -343,228 +216,117 @@ namespace
             auto fn = reinterpret_cast<GetDtiFn>(vtable[4]);
             return fn(inst);
         }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            return nullptr;
-        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
     }
 
     bool TryWriteBool(uintptr_t addr, bool value)
     {
-        __try
-        {
-            *reinterpret_cast<bool*>(addr) = value;
-            return true;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            return false;
-        }
+        __try { *reinterpret_cast<bool*>(addr) = value; return true; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
-    // ---------------------------------------------------------
-    // DTI 名字读取
-    // 从 MtDti:Find (39 48 34 ... 48 8B 40 28) 推断：
-    //   0x28 = hash next
-    //   0x30 = flags
-    //   0x34 = hash
-    // Name 通常在 0x20，但尝试 0x18/0x20/0x28 防止猜错。
-    // ---------------------------------------------------------
+    // 暴破所有可能的指针，并放宽读取条件
     const char* ReadDtiNameSafe(void* dti)
     {
-        const uintptr_t base = reinterpret_cast<uintptr_t>(dti);
-        // MT Framework DTI 结构：
-        //   +0x00 vtable
-        //   +0x08 parent
-        //   +0x10 name        <-- 名字在这里
-        //   +0x18 child
-        //   +0x20 sibling
-        //   +0x28 hash_next
-        //   +0x30 flags
-        //   +0x34 hash
-        const uintptr_t candidates[] = { 0x10, 0x18, 0x20, 0x28 };
-        for (size_t i = 0; i < 4; i++)
+        const uintptr_t base = (uintptr_t)dti;
+        const uintptr_t candidates[] = { 0x20, 0x28, 0x08, 0x10, 0x18 };
+        for (size_t i = 0; i < 5; i++)
         {
             uint64_t namePtr = 0;
             if (!TryReadU64(base + candidates[i], namePtr)) continue;
             if (namePtr < 0x10000) continue;
-            if (IsReadableString(static_cast<uintptr_t>(namePtr)))
-                return reinterpret_cast<const char*>(namePtr);
+
+            // 首先尝试严格匹配
+            if (IsReadableString((uintptr_t)namePtr))
+                return (const char*)namePtr;
+
+            // 如果失败，看看是不是解析到了相邻的单例地址
+            if (namePtr > 0x140000000 && namePtr < 0x150000000)
+            {
+                // 可能是字符串直接是内联在 DTI 结构里的？或者忽略格式
+                __try {
+                    const char* p = (const char*)namePtr;
+                    // 强制看看前两个字符是不是英文字母
+                    if ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))
+                        return p;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
         }
         return nullptr;
     }
 
-    // ---------------------------------------------------------
-    // 安装 cSystem::Ctor Hook
-    // ---------------------------------------------------------
     bool InstallCSystemCtorHook()
     {
         HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
-        if (!module)
-        {
-            Log("module not found");
-            return false;
-        }
+        if (!module) return false;
 
         const uintptr_t scanAddr = ScanPattern("MonsterHunterWorld.exe", kCSystemCtorPattern);
-        if (!scanAddr)
-        {
-            Log("cSystem:Ctor pattern not found");
-            return false;
-        }
+        if (!scanAddr) return false;
 
         const uintptr_t ctorAddr = scanAddr + kCSystemCtorOffset;
-        Log("cSystem:Ctor at 0x%p (pattern 0x%p)",
-            reinterpret_cast<void*>(ctorAddr), reinterpret_cast<void*>(scanAddr));
-
-        // 预期入口: 40 53 48 83 EC XX  (push rbx; sub rsp, imm8)
-        const uint8_t* entry = reinterpret_cast<const uint8_t*>(ctorAddr);
-        if (entry[0] != 0x40 || entry[1] != 0x53 ||
-            entry[2] != 0x48 || entry[3] != 0x83 || entry[4] != 0xEC)
-        {
-            Log("unexpected prologue at cSystem:Ctor: %02X %02X %02X %02X %02X",
-                entry[0], entry[1], entry[2], entry[3], entry[4]);
+        const uint8_t* entry = (const uint8_t*)ctorAddr;
+        if (entry[0] != 0x40 || entry[1] != 0x53 || entry[2] != 0x48 || entry[3] != 0x83 || entry[4] != 0xEC)
             return false;
-        }
 
         const uint8_t stackSub = entry[5];
-        Log("entry prologue: 40 53 48 83 EC %02X (sub rsp, 0x%02X)", stackSub, stackSub);
-
         const uintptr_t returnAddr = ctorAddr + kPatchLength;
         const uintptr_t caveAddr = AllocNear(ctorAddr, kCaveSize);
-        if (!caveAddr)
-        {
-            Log("AllocNear failed for cSystem:Ctor");
-            return false;
-        }
+        if (!caveAddr) return false;
 
         uint8_t code[0x80] = {};
         size_t p = 0;
 
-        // 重放被覆盖的 prologue: push rbx; sub rsp, XX
         code[p++] = 0x40; code[p++] = 0x53;
         code[p++] = 0x48; code[p++] = 0x83; code[p++] = 0xEC; code[p++] = stackSub;
 
-        // 保存 volatile 寄存器
-        code[p++] = 0x50;                               // push rax
-        code[p++] = 0x51;                               // push rcx (this)
-        code[p++] = 0x52;                               // push rdx
-        code[p++] = 0x41; code[p++] = 0x50;             // push r8
-        code[p++] = 0x41; code[p++] = 0x51;             // push r9
-        code[p++] = 0x41; code[p++] = 0x52;             // push r10
-        code[p++] = 0x41; code[p++] = 0x53;             // push r11
+        code[p++] = 0x50; code[p++] = 0x51; code[p++] = 0x52;
+        code[p++] = 0x41; code[p++] = 0x50; code[p++] = 0x41; code[p++] = 0x51;
+        code[p++] = 0x41; code[p++] = 0x52; code[p++] = 0x41; code[p++] = 0x53;
 
-        // mov rax, RecordSingleton
-        code[p++] = 0x48;
-        code[p++] = 0xB8;
-        const uint64_t fnAddr = reinterpret_cast<uint64_t>(&RecordSingleton);
-        std::memcpy(&code[p], &fnAddr, 8);
-        p += 8;
+        code[p++] = 0x48; code[p++] = 0xB8;
+        const uint64_t fnAddr = (uint64_t)&RecordSingleton;
+        std::memcpy(&code[p], &fnAddr, 8); p += 8;
 
-        // call rax  (rcx 仍为 this)
-        code[p++] = 0xFF;
-        code[p++] = 0xD0;
+        code[p++] = 0xFF; code[p++] = 0xD0;
 
-        // 恢复 volatile 寄存器
-        code[p++] = 0x41; code[p++] = 0x5B;             // pop r11
-        code[p++] = 0x41; code[p++] = 0x5A;             // pop r10
-        code[p++] = 0x41; code[p++] = 0x59;             // pop r9
-        code[p++] = 0x41; code[p++] = 0x58;             // pop r8
-        code[p++] = 0x5A;                               // pop rdx
-        code[p++] = 0x59;                               // pop rcx
-        code[p++] = 0x58;                               // pop rax
+        code[p++] = 0x41; code[p++] = 0x5B; code[p++] = 0x41; code[p++] = 0x5A;
+        code[p++] = 0x41; code[p++] = 0x59; code[p++] = 0x41; code[p++] = 0x58;
+        code[p++] = 0x5A; code[p++] = 0x59; code[p++] = 0x58;
 
-        // jmp returnAddr
         const size_t jmp_pos = p;
         code[p++] = 0xE9;
         const size_t jmp_disp_pos = p;
         p += 4;
 
-        const int64_t backDisp =
-            static_cast<int64_t>(returnAddr) -
-            static_cast<int64_t>(caveAddr + jmp_pos + 5);
-        if (!FitsRel32(backDisp))
-        {
-            Log("cSystem:Ctor back jump out of range (cave 0x%p)",
-                reinterpret_cast<void*>(caveAddr));
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
-        int32_t backDisp32 = static_cast<int32_t>(backDisp);
+        int64_t backDisp = (int64_t)returnAddr - (int64_t)(caveAddr + jmp_pos + 5);
+        int32_t backDisp32 = (int32_t)backDisp;
         std::memcpy(&code[jmp_disp_pos], &backDisp32, 4);
 
-        std::memcpy(reinterpret_cast<void*>(caveAddr), code, p);
-        FlushInstructionCache(
-            GetCurrentProcess(),
-            reinterpret_cast<LPCVOID>(caveAddr),
-            p);
+        std::memcpy((void*)caveAddr, code, p);
+        FlushInstructionCache(GetCurrentProcess(), (LPCVOID)caveAddr, p);
 
-        // Patch 前 6 字节: E9 rel32 90
-        const int64_t patchDisp =
-            static_cast<int64_t>(caveAddr) -
-            static_cast<int64_t>(ctorAddr + 5);
-        if (!FitsRel32(patchDisp))
-        {
-            Log("cSystem:Ctor patch jump out of range (cave 0x%p)",
-                reinterpret_cast<void*>(caveAddr));
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
-        int32_t patchDisp32 = static_cast<int32_t>(patchDisp);
+        int64_t patchDisp = (int64_t)caveAddr - (int64_t)(ctorAddr + 5);
+        int32_t patchDisp32 = (int32_t)patchDisp;
 
         uint8_t jmpPatch[kPatchLength] = { 0xE9, 0, 0, 0, 0, 0x90 };
         std::memcpy(&jmpPatch[1], &patchDisp32, 4);
 
         DWORD oldProtect = 0;
-        if (!VirtualProtect(
-                reinterpret_cast<void*>(ctorAddr),
-                kPatchLength,
-                PAGE_EXECUTE_READWRITE,
-                &oldProtect))
-        {
-            Log("cSystem:Ctor VirtualProtect failed");
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
+        if (!VirtualProtect((void*)ctorAddr, kPatchLength, PAGE_EXECUTE_READWRITE, &oldProtect)) return false;
 
-        std::memcpy(reinterpret_cast<void*>(ctorAddr), jmpPatch, kPatchLength);
-        FlushInstructionCache(
-            GetCurrentProcess(),
-            reinterpret_cast<LPCVOID>(ctorAddr),
-            kPatchLength);
-
-        DWORD ignoredProtect = 0;
-        VirtualProtect(
-            reinterpret_cast<void*>(ctorAddr),
-            kPatchLength,
-            oldProtect,
-            &ignoredProtect);
+        std::memcpy((void*)ctorAddr, jmpPatch, kPatchLength);
+        FlushInstructionCache(GetCurrentProcess(), (LPCVOID)ctorAddr, kPatchLength);
+        VirtualProtect((void*)ctorAddr, kPatchLength, oldProtect, &oldProtect);
 
         g_cSystemCtorAddr = ctorAddr;
         g_cSystemCtorCave = caveAddr;
-        Log("cSystem:Ctor hooked, cave=0x%p", reinterpret_cast<void*>(caveAddr));
         return true;
     }
 
-    bool TryInstallHookSeh()
-    {
-        __try
-        {
-            return InstallCSystemCtorHook();
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            return false;
-        }
-    }
-
-    // ---------------------------------------------------------
-    // 查找 sVolumeRenderer
-    // ---------------------------------------------------------
     void DumpSingletons()
     {
         const size_t count = g_singletonCount.load(std::memory_order_acquire);
-        const size_t limit = count < 100 ? count : 100;
+        const size_t limit = count < 10 ? count : 10; // 只打印前 10 个，防止日志太长
         Log("dumping %zu singletons (showing up to %zu)", count, limit);
         for (size_t i = 0; i < limit; i++)
         {
@@ -572,8 +334,7 @@ namespace
             if (!inst) continue;
             void* dti = GetDtiSafe(inst);
             const char* name = dti ? ReadDtiNameSafe(dti) : nullptr;
-            Log("  [%zu] inst=0x%p dti=0x%p name=%s",
-                i, inst, dti, name ? name : "?");
+            Log("  [%zu] inst=0x%p dti=0x%p name=%s", i, inst, dti, name ? name : "?");
         }
     }
 
@@ -594,121 +355,72 @@ namespace
                 return true;
             }
         }
-        Log("sVolumeRenderer not found among %zu singletons", count);
         return false;
     }
 
-    // ---------------------------------------------------------
-    // 配置
-    // ---------------------------------------------------------
-    struct Settings
-    {
-        int volumeRendering = -1;          // -1 = 不修改, 0 = 强制关闭, 1 = 强制开启
-        uintptr_t volumeRendererAddress = 0; // 手动兜底
-    };
-
-    bool TryParseInt(const wchar_t* s, int& out)
-    {
+    struct Settings { int volumeRendering = -1; uintptr_t volumeRendererAddress = 0; };
+    bool TryParseInt(const wchar_t* s, int& out) {
         if (!s || !s[0]) return false;
         wchar_t* end = nullptr;
         long v = wcstol(s, &end, 10);
         if (end == s) return false;
         while (*end == L' ' || *end == L'\t') ++end;
         if (*end != 0) return false;
-        out = static_cast<int>(v);
+        out = (int)v;
         return true;
     }
-
-    int ReadInt(const wchar_t* section, const wchar_t* key, int def, const wchar_t* file)
-    {
+    int ReadInt(const wchar_t* section, const wchar_t* key, int def, const wchar_t* file) {
         wchar_t buf[64] = {};
         GetPrivateProfileStringW(section, key, L"", buf, _countof(buf), file);
         if (buf[0] == 0) return def;
         int v = 0;
         return TryParseInt(buf, v) ? v : def;
     }
-
-    uintptr_t ReadUIntPtr(const wchar_t* section, const wchar_t* key, uintptr_t def, const wchar_t* file)
-    {
+    uintptr_t ReadUIntPtr(const wchar_t* section, const wchar_t* key, uintptr_t def, const wchar_t* file) {
         wchar_t buf[64] = {};
         GetPrivateProfileStringW(section, key, L"", buf, _countof(buf), file);
         if (buf[0] == 0) return def;
         wchar_t* end = nullptr;
-        unsigned long long v = wcstoull(buf, &end, 0); // 0 自动识别 0x 前缀
-        return end == buf ? def : static_cast<uintptr_t>(v);
+        unsigned long long v = wcstoull(buf, &end, 0);
+        return end == buf ? def : (uintptr_t)v;
     }
-
-    Settings LoadSettings(const std::wstring& path)
-    {
+    Settings LoadSettings(const std::wstring& path) {
         Settings s;
         s.volumeRendering = ReadInt(L"Settings", L"VolumeRendering", -1, path.c_str());
         s.volumeRendererAddress = ReadUIntPtr(L"Settings", L"VolumeRendererAddress", 0, path.c_str());
         return s;
     }
-
-    FILETIME GetFileWriteTime(const std::wstring& path)
-    {
+    FILETIME GetFileWriteTime(const std::wstring& path) {
         FILETIME ft{};
         WIN32_FILE_ATTRIBUTE_DATA data{};
         if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
             ft = data.ftLastWriteTime;
         return ft;
     }
-
-    void ApplyVolumeRendering(const Settings& s)
-    {
+    void ApplyVolumeRendering(const Settings& s) {
         void* vr = g_volumeRenderer.load(std::memory_order_acquire);
-
-        if (!vr && s.volumeRendererAddress)
-        {
-            vr = reinterpret_cast<void*>(s.volumeRendererAddress);
+        if (!vr && s.volumeRendererAddress) {
+            vr = (void*)s.volumeRendererAddress;
             g_volumeRenderer.store(vr, std::memory_order_release);
-            Log("using manual VolumeRenderer address 0x%p",
-                reinterpret_cast<void*>(s.volumeRendererAddress));
         }
-
         if (!vr) return;
         if (s.volumeRendering < 0) return;
-
         const bool enabled = (s.volumeRendering != 0);
-        const uintptr_t addr = reinterpret_cast<uintptr_t>(vr) + kVolumeRendererEnabledOffset;
-
-        if (!TryWriteBool(addr, enabled))
-        {
-            Log("failed to write volume renderer at 0x%p, will retry",
-                reinterpret_cast<void*>(addr));
+        const uintptr_t addr = (uintptr_t)vr + kVolumeRendererEnabledOffset;
+        if (!TryWriteBool(addr, enabled)) {
             g_volumeRenderer.store(nullptr, std::memory_order_release);
         }
     }
-
-    void CreateDefaultIni(const std::filesystem::path& path)
-    {
+    void CreateDefaultIni(const std::filesystem::path& path) {
         std::error_code ec;
         if (std::filesystem::exists(path, ec)) return;
-
         FILE* f = nullptr;
         _wfopen_s(&f, path.c_str(), L"w");
         if (!f) return;
-
-        fputs(
-            "; Primary Shadow Tweak (Volume Rendering)\r\n"
-            "\r\n"
-            "[Settings]\r\n"
-            "; -1 = 不修改（游戏内设置生效）\r\n"
-            ";  0 = 强制关闭体积雾（包括瘴气谷）\r\n"
-            ";  1 = 强制开启\r\n"
-            "VolumeRendering=-1\r\n"
-            "\r\n"
-            "; 兜底：如果自动找不到 sVolumeRenderer，可以在这里手填对象地址（十六进制，0x 开头）。\r\n"
-            "; 留 0 表示自动查找。\r\n"
-            "VolumeRendererAddress=0\r\n",
-            f);
+        fputs("; Primary Shadow Tweak (Volume Rendering)\r\n\r\n[Settings]\r\n; -1 = 不修改, 0 = 强制关闭, 1 = 强制开启\r\nVolumeRendering=-1\r\n\r\n; 如果自动找不到，手填对象地址(0x开头)\r\nVolumeRendererAddress=0\r\n", f);
         fclose(f);
     }
 
-    // ---------------------------------------------------------
-    // 主流程
-    // ---------------------------------------------------------
     void Worker(HMODULE module)
     {
         wchar_t buf[MAX_PATH] = {};
@@ -716,7 +428,6 @@ namespace
         std::filesystem::path dllPath(buf);
         std::filesystem::path dir = dllPath.parent_path();
         std::wstring stem = dllPath.stem().wstring();
-
         g_iniPath = (dir / (stem + L".ini")).wstring();
         g_logPath = (dir / (stem + L".log")).wstring();
 
@@ -724,154 +435,91 @@ namespace
         Log("PrimaryShadow (Volume) loaded from %ls", dllPath.c_str());
 
         CreateDefaultIni(g_iniPath);
-
         Settings settings = LoadSettings(g_iniPath);
         g_iniWriteTime = GetFileWriteTime(g_iniPath);
-        Log("initial: VolumeRendering=%d, VolumeRendererAddress=0x%p",
-            settings.volumeRendering,
-            reinterpret_cast<void*>(settings.volumeRendererAddress));
 
-        Log("waiting 300ms for game init...");
-        Sleep(300);
+        // 【关键改动】废弃 Sleep(300)，死死卡在这里等游戏模块加载完，并立刻注入
+        Log("Trying to install cSystem::Ctor hook immediately...");
+        while (!g_started.load()) {
+            __try {
+                if (InstallCSystemCtorHook()) {
+                    Log("cSystem::Ctor hooked early!");
+                    break;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            Sleep(10);
+        }
 
-        constexpr int kMaxHookAttempts = 60;
-        constexpr DWORD kHookRetryInterval = 300;
-        bool hookDone = false;
-        for (int i = 0; i < kMaxHookAttempts && !hookDone; ++i)
-        {
-            if (TryInstallHookSeh())
-            {
-                hookDone = true;
-                break;
+        if (!g_started.load()) {
+            // 等游戏进入主菜单或场景再开始找
+            Sleep(8000);
+            Log("recorded %zu singletons so far", g_singletonCount.load(std::memory_order_acquire));
+
+            bool found = false;
+            for (int i = 0; i < 30 && !found; ++i) {
+                if (TryFindVolumeRenderer()) found = true;
+                else Sleep(2000);
             }
-            if (i + 1 < kMaxHookAttempts)
-                Sleep(kHookRetryInterval);
-        }
 
-        if (!hookDone)
-        {
-            Log("failed to install cSystem::Ctor hook after %d attempts", kMaxHookAttempts);
-            g_started.store(false, std::memory_order_release);
-            return;
-        }
-
-        // 等所有单例构造完成
-        Sleep(10000);
-        Log("recorded %zu singletons so far", g_singletonCount.load(std::memory_order_acquire));
-
-        // 查找 sVolumeRenderer
-        constexpr int kMaxFindAttempts = 30;
-        constexpr DWORD kFindRetryInterval = 2000;
-        bool found = false;
-        for (int i = 0; i < kMaxFindAttempts && !found; ++i)
-        {
-            if (TryFindVolumeRenderer())
-            {
-                found = true;
-                break;
+            if (!found) {
+                Log("sVolumeRenderer not found, dumping for diagnosis");
+                DumpSingletons();
+                Log("patch inactive; hook stays installed");
             }
-            if (i + 1 < kMaxFindAttempts)
-                Sleep(kFindRetryInterval);
         }
 
-        if (!found)
-        {
-            Log("sVolumeRenderer not found, dumping singletons for diagnosis");
-            DumpSingletons();
-            Log("volume rendering patch inactive; hook stays installed");
-        }
-
-        // 主循环
-        while (g_started.load(std::memory_order_acquire))
+        while (g_started.load())
         {
             Sleep(10);
-
-            if (!g_started.load(std::memory_order_acquire))
-                break;
-
-            // 如果还没找到 sVolumeRenderer，定期重试
-            if (!g_volumeRenderer.load(std::memory_order_acquire))
-            {
+            if (!g_volumeRenderer.load(std::memory_order_acquire)) {
+                // 如果没找到，每5秒尝试一次
                 static DWORD lastRetry = 0;
                 DWORD now = GetTickCount();
-                if (now - lastRetry >= 5000)
-                {
+                if (now - lastRetry >= 5000) {
                     lastRetry = now;
                     TryFindVolumeRenderer();
                 }
                 continue;
             }
 
-            // 应用设置
             ApplyVolumeRendering(settings);
 
-            // INI 热更新（每秒检查一次）
             static int tick = 0;
-            if (++tick >= 100)
-            {
+            if (++tick >= 100) {
                 tick = 0;
                 FILETIME ft = GetFileWriteTime(g_iniPath);
-                if (CompareFileTime(&ft, &g_iniWriteTime) != 0)
-                {
+                if (CompareFileTime(&ft, &g_iniWriteTime) != 0) {
                     g_iniWriteTime = ft;
                     Settings updated = LoadSettings(g_iniPath);
-                    if (updated.volumeRendering != settings.volumeRendering ||
-                        updated.volumeRendererAddress != settings.volumeRendererAddress)
-                    {
+                    if (updated.volumeRendering != settings.volumeRendering || updated.volumeRendererAddress != settings.volumeRendererAddress) {
                         settings = updated;
-                        if (settings.volumeRendererAddress)
-                            g_volumeRenderer.store(
-                                reinterpret_cast<void*>(settings.volumeRendererAddress),
-                                std::memory_order_release);
-                        Log("reloaded: VolumeRendering=%d, VolumeRendererAddress=0x%p",
-                            settings.volumeRendering,
-                            reinterpret_cast<void*>(settings.volumeRendererAddress));
+                        if (settings.volumeRendererAddress) g_volumeRenderer.store((void*)settings.volumeRendererAddress, std::memory_order_release);
+                        Log("reloaded: VolumeRendering=%d", settings.volumeRendering);
                     }
                 }
             }
         }
 
-        if (g_logFile)
-        {
-            fclose(g_logFile);
-            g_logFile = nullptr;
-        }
+        if (g_logFile) { fclose(g_logFile); g_logFile = nullptr; }
     }
-} // namespace
+}
 
 __declspec(dllexport) bool Load()
 {
     bool expected = false;
-    if (!g_started.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel))
-    {
-        return true;
-    }
+    if (!g_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return true;
 
     HMODULE module = g_hModule;
-    if (!module)
-    {
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&Load),
-            &module);
+    if (!module) {
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&Load, &module);
     }
 
-    HANDLE thread = CreateThread(
-        nullptr,
-        0,
-        [](LPVOID param) -> DWORD
-        {
-            Worker(static_cast<HMODULE>(param));
-            return 0;
-        },
-        module,
-        0,
-        nullptr);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+        Worker((HMODULE)param);
+        return 0;
+    }, module, 0, nullptr);
 
-    if (!thread)
-    {
+    if (!thread) {
         g_started.store(false, std::memory_order_release);
         return false;
     }
@@ -882,12 +530,10 @@ __declspec(dllexport) bool Load()
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
-    if (reason == DLL_PROCESS_ATTACH)
-    {
+    if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
         g_hModule = module;
         Load();
     }
-
     return TRUE;
 }
