@@ -312,7 +312,13 @@ namespace
         {
             const char* p = reinterpret_cast<const char*>(addr);
             char c = p[0];
-            if (c < 'a' || c > 'z') return false;
+            // DTI 名字可能以 s/c/Mt/Mh 等开头，放宽首字符限制。
+            if (!((c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') ||
+                  c == '_'))
+            {
+                return false;
+            }
             for (int i = 1; i < 128; i++)
             {
                 char ch = p[i];
@@ -367,8 +373,17 @@ namespace
     const char* ReadDtiNameSafe(void* dti)
     {
         const uintptr_t base = reinterpret_cast<uintptr_t>(dti);
-        const uintptr_t candidates[] = { 0x18, 0x20, 0x28 };
-        for (size_t i = 0; i < 3; i++)
+        // MT Framework DTI 结构：
+        //   +0x00 vtable
+        //   +0x08 parent
+        //   +0x10 name        <-- 名字在这里
+        //   +0x18 child
+        //   +0x20 sibling
+        //   +0x28 hash_next
+        //   +0x30 flags
+        //   +0x34 hash
+        const uintptr_t candidates[] = { 0x10, 0x18, 0x20, 0x28 };
+        for (size_t i = 0; i < 4; i++)
         {
             uint64_t namePtr = 0;
             if (!TryReadU64(base + candidates[i], namePtr)) continue;
@@ -777,7 +792,13 @@ namespace
             // 如果还没找到 sVolumeRenderer，定期重试
             if (!g_volumeRenderer.load(std::memory_order_acquire))
             {
-                TryFindVolumeRenderer();
+                static DWORD lastRetry = 0;
+                DWORD now = GetTickCount();
+                if (now - lastRetry >= 5000)
+                {
+                    lastRetry = now;
+                    TryFindVolumeRenderer();
+                }
                 continue;
             }
 
