@@ -15,28 +15,32 @@ namespace
     std::atomic_bool g_started{ false };
     HMODULE g_hModule = nullptr;
 
-    // 只覆盖 UpdatePrimaryLightParams 入口第一条完整指令:
-    //   48 89 5C 24 10  mov [rsp+0x10], rbx
-    // 跳回 scanAddr+5 时后续指令完全保持原样。
+    // cSystem:Ctor 的 Pattern（来自 AddressRecords.json）
+    // 匹配到的是 "48 83 C1 08 ..." 这条，函数入口在匹配位置 - 19 字节。
+    const std::vector<int> kCSystemCtorPattern = {
+        0x48, 0x83, 0xC1, 0x08, 0xFF, 0x15, -1, -1, -1, -1,
+        0x48, 0x8B, 0xC3, 0xC6, 0x43, 0x30, 0x01,
+        0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3
+    };
+    constexpr int kCSystemCtorOffset = -19;
+
     constexpr size_t kPatchLength = 5;
     constexpr size_t kCaveSize = 0x100;
 
-    // 精简 cave 里 CascadeMode 数据槽偏移（构造时校验）
-    constexpr size_t kCascadeModeOffset = 0x2C;
+    // sVolumeRenderer + 0x38 是 bool
+    constexpr uintptr_t kVolumeRendererEnabledOffset = 0x38;
 
-    // C# 版 Assert(addr == 0x141AB2260)；模块基址 0x140000000 时 RVA = 0x1AB2260。
-    constexpr uintptr_t kExpectedRva = 0x1AB2260;
+    // 单例记录上限。MT Framework 单例数量远小于这个值。
+    constexpr size_t kMaxSingletons = 4096;
 
-    // UpdatePrimaryLightParams 入口特征码。
-    const std::vector<int> kPrimaryLightPattern = {
-        0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18,
-        0x48, 0x89, 0x7C, 0x24, 0x20, 0x55, 0x41, 0x56, 0x41, 0x57,
-        0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xFA,
-        0x48, 0x8B, 0xD9, 0xE8, 0xAA, 0xB6, 0xC1, 0xFF, 0x48, 0x8B,
-        0x47, 0x10, 0x48, 0x8D, 0x57, 0x50
-    };
+    void* g_singletons[kMaxSingletons] = {};
+    std::atomic<size_t> g_singletonCount{ 0 };
 
-    uintptr_t g_caveAddr = 0;
+    std::atomic<void*> g_volumeRenderer{ nullptr };
+
+    uintptr_t g_cSystemCtorAddr = 0;
+    uintptr_t g_cSystemCtorCave = 0;
+
     std::wstring g_iniPath;
     std::wstring g_logPath;
     FILETIME g_iniWriteTime{};
@@ -214,7 +218,6 @@ namespace
             else break;
         }
 
-        // 兜底：.text 段中连续的 0xCC 填充作为 cave。
         HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
         if (!module) return 0;
 
@@ -275,195 +278,77 @@ namespace
     }
 
     // ---------------------------------------------------------
-    // 安装 hook（只处理 CascadeMode）
+    // cSystem::Ctor 的 cave 入口会被调用到这里
+    // 注意：这个函数运行在游戏线程，必须简单、无异常、无分配。
     // ---------------------------------------------------------
-    bool SetupPrimaryShadowHook()
+    extern "C" void RecordSingleton(void* thisPtr)
     {
-        HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
-        if (!module)
+        const size_t idx = g_singletonCount.fetch_add(1, std::memory_order_acq_rel);
+        if (idx < kMaxSingletons)
         {
-            Log("module not found");
-            return false;
+            g_singletons[idx] = thisPtr;
         }
-
-        const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(module);
-        const uintptr_t scanAddr = ScanPattern("MonsterHunterWorld.exe", kPrimaryLightPattern);
-        if (!scanAddr)
-        {
-            Log("pattern not found");
-            return false;
-        }
-
-        const uintptr_t rva = scanAddr - moduleBase;
-        Log("found UpdatePrimaryLightParams at 0x%p (RVA 0x%p)",
-            reinterpret_cast<void*>(scanAddr), reinterpret_cast<void*>(rva));
-        if (rva != kExpectedRva)
-        {
-            Log("WARNING: RVA mismatch (expected 0x%p), version may differ",
-                reinterpret_cast<void*>(kExpectedRva));
-        }
-
-        const uintptr_t returnAddr = scanAddr + kPatchLength;
-        const uintptr_t caveAddr = AllocNear(scanAddr, kCaveSize);
-        if (!caveAddr)
-        {
-            Log("AllocNear failed");
-            return false;
-        }
-
-        uint8_t code[0x40] = {};
-        size_t p = 0;
-
-        // 原始指令: mov [rsp+0x10], rbx
-        code[p++] = 0x48; code[p++] = 0x89; code[p++] = 0x5C;
-        code[p++] = 0x24; code[p++] = 0x10;
-
-        // push rax / rcx / rdx
-        code[p++] = 0x50;
-        code[p++] = 0x51;
-        code[p++] = 0x52;
-
-        // mov rax, rdx
-        code[p++] = 0x48; code[p++] = 0x8B; code[p++] = 0xC2;
-
-        // movzx eax, byte [rax+0x1D]
-        code[p++] = 0x0F; code[p++] = 0xB6; code[p++] = 0x40; code[p++] = 0x1D;
-
-        // cmp al, 1
-        code[p++] = 0x3C; code[p++] = 0x01;
-
-        // jne skip_all
-        const size_t jne_pos = p;
-        code[p++] = 0x75; code[p++] = 0x00;
-
-        // mov eax, [rip+disp]  （读 CascadeMode 数据槽）
-        const size_t mov_pos = p;
-        code[p++] = 0x8B; code[p++] = 0x05;
-        const size_t mov_disp_pos = p;
-        p += 4;
-
-        // cmp eax, -1
-        code[p++] = 0x83; code[p++] = 0xF8; code[p++] = 0xFF;
-
-        // je skip_cascade
-        const size_t je_pos = p;
-        code[p++] = 0x74; code[p++] = 0x00;
-
-        // mov [rdx+0x174], eax
-        code[p++] = 0x89; code[p++] = 0x82;
-        code[p++] = 0x74; code[p++] = 0x01; code[p++] = 0x00; code[p++] = 0x00;
-
-        const size_t skip_cascade_pos = p;
-        const size_t skip_all_pos = p;
-
-        // pop rdx / rcx / rax
-        code[p++] = 0x5A;
-        code[p++] = 0x59;
-        code[p++] = 0x58;
-
-        // jmp returnAddr
-        const size_t jmp_pos = p;
-        code[p++] = 0xE9;
-        const size_t jmp_disp_pos = p;
-        p += 4;
-
-        // 数据槽
-        const size_t cascade_slot_pos = p;
-        p += 4;
-
-        static_assert(kCascadeModeOffset == 0x2C, "cave layout changed");
-        if (cascade_slot_pos != kCascadeModeOffset)
-        {
-            Log("internal cave offset mismatch: got 0x%zX", cascade_slot_pos);
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
-
-        // 填充跳转
-        code[jne_pos + 1] = static_cast<uint8_t>(skip_all_pos - (jne_pos + 2));
-
-        int32_t mov_disp = static_cast<int32_t>(
-            cascade_slot_pos - (mov_pos + 6));
-        std::memcpy(&code[mov_disp_pos], &mov_disp, 4);
-
-        code[je_pos + 1] = static_cast<uint8_t>(
-            skip_cascade_pos - (je_pos + 2));
-
-        // 初始禁用
-        int32_t disabled = -1;
-        std::memcpy(&code[cascade_slot_pos], &disabled, 4);
-
-        // 跳回原函数
-        const int64_t back_disp =
-            static_cast<int64_t>(returnAddr) -
-            static_cast<int64_t>(caveAddr + jmp_pos + 5);
-        if (!FitsRel32(back_disp))
-        {
-            Log("back jump out of range (cave 0x%p)", reinterpret_cast<void*>(caveAddr));
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
-        int32_t back_disp32 = static_cast<int32_t>(back_disp);
-        std::memcpy(&code[jmp_disp_pos], &back_disp32, 4);
-
-        // 写 cave
-        std::memcpy(reinterpret_cast<void*>(caveAddr), code, p);
-        FlushInstructionCache(
-            GetCurrentProcess(),
-            reinterpret_cast<LPCVOID>(caveAddr),
-            p);
-
-        // Patch 入口
-        const int64_t patch_disp =
-            static_cast<int64_t>(caveAddr) -
-            static_cast<int64_t>(scanAddr + 5);
-        if (!FitsRel32(patch_disp))
-        {
-            Log("patch jump out of range (cave 0x%p)", reinterpret_cast<void*>(caveAddr));
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
-        int32_t patch_disp32 = static_cast<int32_t>(patch_disp);
-
-        uint8_t jmp_patch[kPatchLength] = { 0xE9 };
-        std::memcpy(&jmp_patch[1], &patch_disp32, 4);
-
-        DWORD oldProtect = 0;
-        if (!VirtualProtect(
-                reinterpret_cast<void*>(scanAddr),
-                kPatchLength,
-                PAGE_EXECUTE_READWRITE,
-                &oldProtect))
-        {
-            Log("VirtualProtect failed");
-            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
-            return false;
-        }
-
-        std::memcpy(reinterpret_cast<void*>(scanAddr), jmp_patch, kPatchLength);
-        FlushInstructionCache(
-            GetCurrentProcess(),
-            reinterpret_cast<LPCVOID>(scanAddr),
-            kPatchLength);
-
-        DWORD ignoredProtect = 0;
-        VirtualProtect(
-            reinterpret_cast<void*>(scanAddr),
-            kPatchLength,
-            oldProtect,
-            &ignoredProtect);
-
-        g_caveAddr = caveAddr;
-        Log("hook installed, cave=0x%p", reinterpret_cast<void*>(caveAddr));
-        return true;
     }
 
-    // C2712 修复：__try 放在只有标量局部变量的独立函数里。
-    bool TryInstallHookSeh()
+    // ---------------------------------------------------------
+    // SEH 辅助（都只有标量局部变量，避免 C2712）
+    // ---------------------------------------------------------
+    bool TryReadU64(uintptr_t addr, uint64_t& out)
     {
         __try
         {
-            return SetupPrimaryShadowHook();
+            out = *reinterpret_cast<uint64_t*>(addr);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool IsReadableString(uintptr_t addr)
+    {
+        __try
+        {
+            const char* p = reinterpret_cast<const char*>(addr);
+            char c = p[0];
+            if (c < 'a' || c > 'z') return false;
+            for (int i = 1; i < 128; i++)
+            {
+                char ch = p[i];
+                if (ch == 0) return true;
+                if (ch < 0x20 || ch > 0x7E) return false;
+            }
+            return false;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    void* GetDtiSafe(void* inst)
+    {
+        __try
+        {
+            void** vtable = *reinterpret_cast<void***>(inst);
+            if (!vtable || !vtable[4]) return nullptr;
+            using GetDtiFn = void* (*)(void*);
+            auto fn = reinterpret_cast<GetDtiFn>(vtable[4]);
+            return fn(inst);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return nullptr;
+        }
+    }
+
+    bool TryWriteBool(uintptr_t addr, bool value)
+    {
+        __try
+        {
+            *reinterpret_cast<bool*>(addr) = value;
+            return true;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -472,11 +357,240 @@ namespace
     }
 
     // ---------------------------------------------------------
+    // DTI 名字读取
+    // 从 MtDti:Find (39 48 34 ... 48 8B 40 28) 推断：
+    //   0x28 = hash next
+    //   0x30 = flags
+    //   0x34 = hash
+    // Name 通常在 0x20，但尝试 0x18/0x20/0x28 防止猜错。
+    // ---------------------------------------------------------
+    const char* ReadDtiNameSafe(void* dti)
+    {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(dti);
+        const uintptr_t candidates[] = { 0x18, 0x20, 0x28 };
+        for (size_t i = 0; i < 3; i++)
+        {
+            uint64_t namePtr = 0;
+            if (!TryReadU64(base + candidates[i], namePtr)) continue;
+            if (namePtr < 0x10000) continue;
+            if (IsReadableString(static_cast<uintptr_t>(namePtr)))
+                return reinterpret_cast<const char*>(namePtr);
+        }
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------
+    // 安装 cSystem::Ctor Hook
+    // ---------------------------------------------------------
+    bool InstallCSystemCtorHook()
+    {
+        HMODULE module = GetModuleHandleA("MonsterHunterWorld.exe");
+        if (!module)
+        {
+            Log("module not found");
+            return false;
+        }
+
+        const uintptr_t scanAddr = ScanPattern("MonsterHunterWorld.exe", kCSystemCtorPattern);
+        if (!scanAddr)
+        {
+            Log("cSystem:Ctor pattern not found");
+            return false;
+        }
+
+        const uintptr_t ctorAddr = scanAddr + kCSystemCtorOffset;
+        Log("cSystem:Ctor at 0x%p (pattern 0x%p)",
+            reinterpret_cast<void*>(ctorAddr), reinterpret_cast<void*>(scanAddr));
+
+        // 检查入口第一条指令是否为 48 89 5C 24 XX
+        const uint8_t* entry = reinterpret_cast<const uint8_t*>(ctorAddr);
+        if (entry[0] != 0x48 || entry[1] != 0x89 || entry[2] != 0x5C || entry[3] != 0x24)
+        {
+            Log("unexpected prologue at cSystem:Ctor: %02X %02X %02X %02X %02X",
+                entry[0], entry[1], entry[2], entry[3], entry[4]);
+            return false;
+        }
+
+        const uint8_t stackOff = entry[4];
+        Log("entry prologue: 48 89 5C 24 %02X", stackOff);
+
+        const uintptr_t returnAddr = ctorAddr + kPatchLength;
+        const uintptr_t caveAddr = AllocNear(ctorAddr, kCaveSize);
+        if (!caveAddr)
+        {
+            Log("AllocNear failed for cSystem:Ctor");
+            return false;
+        }
+
+        uint8_t code[0x80] = {};
+        size_t p = 0;
+
+        // 原指令: mov [rsp+XX], rbx
+        code[p++] = 0x48;
+        code[p++] = 0x89;
+        code[p++] = 0x5C;
+        code[p++] = 0x24;
+        code[p++] = stackOff;
+
+        // push rax, rcx, rdx, r8, r9, r10, r11
+        code[p++] = 0x50;                               // push rax
+        code[p++] = 0x51;                               // push rcx
+        code[p++] = 0x52;                               // push rdx
+        code[p++] = 0x41; code[p++] = 0x50;             // push r8
+        code[p++] = 0x41; code[p++] = 0x51;             // push r9
+        code[p++] = 0x41; code[p++] = 0x52;             // push r10
+        code[p++] = 0x41; code[p++] = 0x53;             // push r11
+
+        // mov rax, RecordSingleton
+        code[p++] = 0x48;
+        code[p++] = 0xB8;
+        const uint64_t fnAddr = reinterpret_cast<uint64_t>(&RecordSingleton);
+        std::memcpy(&code[p], &fnAddr, 8);
+        p += 8;
+
+        // call rax
+        code[p++] = 0xFF;
+        code[p++] = 0xD0;
+
+        // pop r11, r10, r9, r8, rdx, rcx, rax
+        code[p++] = 0x41; code[p++] = 0x5B;             // pop r11
+        code[p++] = 0x41; code[p++] = 0x5A;             // pop r10
+        code[p++] = 0x41; code[p++] = 0x59;             // pop r9
+        code[p++] = 0x41; code[p++] = 0x58;             // pop r8
+        code[p++] = 0x5A;                               // pop rdx
+        code[p++] = 0x59;                               // pop rcx
+        code[p++] = 0x58;                               // pop rax
+
+        // jmp returnAddr
+        const size_t jmp_pos = p;
+        code[p++] = 0xE9;
+        const size_t jmp_disp_pos = p;
+        p += 4;
+
+        const int64_t backDisp =
+            static_cast<int64_t>(returnAddr) -
+            static_cast<int64_t>(caveAddr + jmp_pos + 5);
+        if (!FitsRel32(backDisp))
+        {
+            Log("cSystem:Ctor back jump out of range (cave 0x%p)",
+                reinterpret_cast<void*>(caveAddr));
+            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
+            return false;
+        }
+        int32_t backDisp32 = static_cast<int32_t>(backDisp);
+        std::memcpy(&code[jmp_disp_pos], &backDisp32, 4);
+
+        std::memcpy(reinterpret_cast<void*>(caveAddr), code, p);
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            reinterpret_cast<LPCVOID>(caveAddr),
+            p);
+
+        // Patch 入口
+        const int64_t patchDisp =
+            static_cast<int64_t>(caveAddr) -
+            static_cast<int64_t>(ctorAddr + 5);
+        if (!FitsRel32(patchDisp))
+        {
+            Log("cSystem:Ctor patch jump out of range (cave 0x%p)",
+                reinterpret_cast<void*>(caveAddr));
+            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
+            return false;
+        }
+        int32_t patchDisp32 = static_cast<int32_t>(patchDisp);
+
+        uint8_t jmpPatch[kPatchLength] = { 0xE9 };
+        std::memcpy(&jmpPatch[1], &patchDisp32, 4);
+
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(ctorAddr),
+                kPatchLength,
+                PAGE_EXECUTE_READWRITE,
+                &oldProtect))
+        {
+            Log("cSystem:Ctor VirtualProtect failed");
+            VirtualFree(reinterpret_cast<void*>(caveAddr), 0, MEM_RELEASE);
+            return false;
+        }
+
+        std::memcpy(reinterpret_cast<void*>(ctorAddr), jmpPatch, kPatchLength);
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            reinterpret_cast<LPCVOID>(ctorAddr),
+            kPatchLength);
+
+        DWORD ignoredProtect = 0;
+        VirtualProtect(
+            reinterpret_cast<void*>(ctorAddr),
+            kPatchLength,
+            oldProtect,
+            &ignoredProtect);
+
+        g_cSystemCtorAddr = ctorAddr;
+        g_cSystemCtorCave = caveAddr;
+        Log("cSystem:Ctor hooked, cave=0x%p", reinterpret_cast<void*>(caveAddr));
+        return true;
+    }
+
+    bool TryInstallHookSeh()
+    {
+        __try
+        {
+            return InstallCSystemCtorHook();
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 查找 sVolumeRenderer
+    // ---------------------------------------------------------
+    void DumpSingletons()
+    {
+        const size_t count = g_singletonCount.load(std::memory_order_acquire);
+        const size_t limit = count < 100 ? count : 100;
+        Log("dumping %zu singletons (showing up to %zu)", count, limit);
+        for (size_t i = 0; i < limit; i++)
+        {
+            void* inst = g_singletons[i];
+            if (!inst) continue;
+            void* dti = GetDtiSafe(inst);
+            const char* name = dti ? ReadDtiNameSafe(dti) : nullptr;
+            Log("  [%zu] inst=0x%p dti=0x%p name=%s",
+                i, inst, dti, name ? name : "?");
+        }
+    }
+
+    bool TryFindVolumeRenderer()
+    {
+        const size_t count = g_singletonCount.load(std::memory_order_acquire);
+        for (size_t i = 0; i < count; i++)
+        {
+            void* inst = g_singletons[i];
+            if (!inst) continue;
+            void* dti = GetDtiSafe(inst);
+            if (!dti) continue;
+            const char* name = ReadDtiNameSafe(dti);
+            if (name && std::strcmp(name, "sVolumeRenderer") == 0)
+            {
+                g_volumeRenderer.store(inst, std::memory_order_release);
+                Log("found sVolumeRenderer at 0x%p (index %zu)", inst, i);
+                return true;
+            }
+        }
+        Log("sVolumeRenderer not found among %zu singletons", count);
+        return false;
+    }
+
+    // ---------------------------------------------------------
     // 配置
     // ---------------------------------------------------------
     struct Settings
     {
-        int cascadeMode = -1;
+        int volumeRendering = -1;  // -1 = 不修改, 0 = 强制关闭, 1 = 强制开启
     };
 
     bool TryParseInt(const wchar_t* s, int& out)
@@ -503,7 +617,7 @@ namespace
     Settings LoadSettings(const std::wstring& path)
     {
         Settings s;
-        s.cascadeMode = ReadInt(L"Settings", L"CascadeMode", -1, path.c_str());
+        s.volumeRendering = ReadInt(L"Settings", L"VolumeRendering", -1, path.c_str());
         return s;
     }
 
@@ -516,22 +630,20 @@ namespace
         return ft;
     }
 
-    // 与 C# 版 pMinMaxStep(0, 3, 1) 等价
-    int32_t ClampCascade(int mode)
+    void ApplyVolumeRendering(const Settings& s)
     {
-        if (mode < 0) return -1;
-        if (mode > 3) return 3;
-        return mode;
-    }
+        void* vr = g_volumeRenderer.load(std::memory_order_acquire);
+        if (!vr) return;
+        if (s.volumeRendering < 0) return;
 
-    void ApplyToCave(const Settings& s)
-    {
-        if (!g_caveAddr) return;
+        const bool enabled = (s.volumeRendering != 0);
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(vr) + kVolumeRendererEnabledOffset;
 
-        int32_t mode = ClampCascade(s.cascadeMode);
-        *reinterpret_cast<int32_t*>(g_caveAddr + kCascadeModeOffset) = mode;
-
-        Log("applied: CascadeMode=%d", mode);
+        if (!TryWriteBool(addr, enabled))
+        {
+            Log("failed to write volume renderer at 0x%p, will retry", reinterpret_cast<void*>(addr));
+            g_volumeRenderer.store(nullptr, std::memory_order_release);
+        }
     }
 
     void CreateDefaultIni(const std::filesystem::path& path)
@@ -544,12 +656,13 @@ namespace
         if (!f) return;
 
         fputs(
-            "; Primary Shadow Tweak (CascadeMode only)\r\n"
-            "; ShadowMapSize override has been removed in this build.\r\n"
+            "; Primary Shadow Tweak (Volume Rendering)\r\n"
             "\r\n"
             "[Settings]\r\n"
-            "; Cascade Mode: -1 = disabled, 0..3 = in-game values.\r\n"
-            "CascadeMode=-1\r\n",
+            "; -1 = 不修改（游戏内设置生效）\r\n"
+            ";  0 = 强制关闭体积雾（包括瘴气谷）\r\n"
+            ";  1 = 强制开启\r\n"
+            "VolumeRendering=-1\r\n",
             f);
         fclose(f);
     }
@@ -569,60 +682,99 @@ namespace
         g_logPath = (dir / (stem + L".log")).wstring();
 
         _wfopen_s(&g_logFile, g_logPath.c_str(), L"w");
-        Log("PrimaryShadow (CascadeMode only) loaded from %ls", dllPath.c_str());
+        Log("PrimaryShadow (Volume) loaded from %ls", dllPath.c_str());
 
         CreateDefaultIni(g_iniPath);
 
         Settings settings = LoadSettings(g_iniPath);
         g_iniWriteTime = GetFileWriteTime(g_iniPath);
-        Log("initial: CascadeMode=%d", settings.cascadeMode);
+        Log("initial: VolumeRendering=%d", settings.volumeRendering);
 
-        Log("waiting 10s for game init...");
-        Sleep(10000);
+        Log("waiting 5s for game init...");
+        Sleep(5000);
 
-        constexpr int kMaxAttempts = 30;
-        constexpr DWORD kRetryInterval = 2000;
-
+        // 安装 cSystem::Ctor Hook
+        constexpr int kMaxHookAttempts = 30;
+        constexpr DWORD kHookRetryInterval = 1000;
         bool hookDone = false;
-        for (int i = 0; i < kMaxAttempts && !hookDone; ++i)
+        for (int i = 0; i < kMaxHookAttempts && !hookDone; ++i)
         {
             if (TryInstallHookSeh())
             {
                 hookDone = true;
                 break;
             }
-
-            if (i + 1 < kMaxAttempts)
-                Sleep(kRetryInterval);
+            if (i + 1 < kMaxHookAttempts)
+                Sleep(kHookRetryInterval);
         }
 
         if (!hookDone)
         {
-            Log("failed to install hook after %d attempts", kMaxAttempts);
+            Log("failed to install cSystem::Ctor hook after %d attempts", kMaxHookAttempts);
             g_started.store(false, std::memory_order_release);
             return;
         }
 
-        ApplyToCave(settings);
+        // 等所有单例构造完成
+        Sleep(10000);
 
+        // 查找 sVolumeRenderer
+        constexpr int kMaxFindAttempts = 30;
+        constexpr DWORD kFindRetryInterval = 2000;
+        bool found = false;
+        for (int i = 0; i < kMaxFindAttempts && !found; ++i)
+        {
+            if (TryFindVolumeRenderer())
+            {
+                found = true;
+                break;
+            }
+            if (i + 1 < kMaxFindAttempts)
+                Sleep(kFindRetryInterval);
+        }
+
+        if (!found)
+        {
+            Log("sVolumeRenderer not found, dumping singletons for diagnosis");
+            DumpSingletons();
+            Log("volume rendering patch inactive; hook stays installed");
+        }
+
+        // 主循环
         while (g_started.load(std::memory_order_acquire))
         {
-            Sleep(1000);
-            if (!g_started.load(std::memory_order_acquire)) break;
+            Sleep(10);
 
-            FILETIME ft = GetFileWriteTime(g_iniPath);
-            if (CompareFileTime(&ft, &g_iniWriteTime) == 0)
+            if (!g_started.load(std::memory_order_acquire))
+                break;
+
+            // 如果还没找到 sVolumeRenderer，定期重试
+            if (!g_volumeRenderer.load(std::memory_order_acquire))
+            {
+                TryFindVolumeRenderer();
                 continue;
+            }
 
-            g_iniWriteTime = ft;
+            // 应用设置
+            ApplyVolumeRendering(settings);
 
-            Settings updated = LoadSettings(g_iniPath);
-            if (updated.cascadeMode == settings.cascadeMode)
-                continue;
-
-            settings = updated;
-            Log("reloaded: CascadeMode=%d", settings.cascadeMode);
-            ApplyToCave(settings);
+            // INI 热更新（每秒检查一次）
+            static int tick = 0;
+            if (++tick >= 100)
+            {
+                tick = 0;
+                FILETIME ft = GetFileWriteTime(g_iniPath);
+                if (CompareFileTime(&ft, &g_iniWriteTime) != 0)
+                {
+                    g_iniWriteTime = ft;
+                    Settings updated = LoadSettings(g_iniPath);
+                    if (updated.volumeRendering != settings.volumeRendering)
+                    {
+                        settings = updated;
+                        Log("reloaded: VolumeRendering=%d", settings.volumeRendering);
+                    }
+                }
+            }
         }
 
         if (g_logFile)
