@@ -451,32 +451,47 @@ namespace
         Settings settings = LoadSettings(g_iniPath);
         g_iniWriteTime = GetFileWriteTime(g_iniPath);
 
-        // 【关键改动】废弃 Sleep(300)，死死卡在这里等游戏模块加载完，并立刻注入
+        // 修复逻辑：用 hookInstalled 标记，而不是依赖 g_started
         Log("Trying to install cSystem::Ctor hook immediately...");
-        while (!g_started.load()) {
+        bool hookInstalled = false;
+        int attempts = 0;
+        while (g_started.load() && !hookInstalled) {
             if (TryInstallHookSeh()) {
+                hookInstalled = true;
                 Log("cSystem::Ctor hooked early!");
                 break;
+            }
+            attempts++;
+            if (attempts % 100 == 0) {
+                Log("Still trying to hook... (attempt %d)", attempts);
             }
             Sleep(10);
         }
 
-        if (!g_started.load()) {
-            // 等游戏进入主菜单或场景再开始找
-            Sleep(8000);
-            Log("recorded %zu singletons so far", g_singletonCount.load(std::memory_order_acquire));
+        if (!hookInstalled) {
+            Log("Failed to hook cSystem::Ctor, aborting.");
+            if (g_logFile) { fclose(g_logFile); g_logFile = nullptr; }
+            return;
+        }
 
-            bool found = false;
-            for (int i = 0; i < 30 && !found; ++i) {
-                if (TryFindVolumeRenderer()) found = true;
-                else Sleep(2000);
-            }
+        // 等游戏进入主菜单或场景再开始找
+        Sleep(8000);
+        Log("recorded %zu singletons so far", g_singletonCount.load(std::memory_order_acquire));
 
-            if (!found) {
-                Log("sVolumeRenderer not found, dumping for diagnosis");
-                DumpSingletons();
-                Log("patch inactive; hook stays installed");
+        bool found = false;
+        for (int i = 0; i < 30 && !found && g_started.load(); ++i) {
+            if (TryFindVolumeRenderer()) {
+                found = true;
+                Log("found sVolumeRenderer during initial search!");
+            } else {
+                Sleep(2000);
             }
+        }
+
+        if (!found) {
+            Log("sVolumeRenderer not found in initial search, dumping for diagnosis");
+            DumpSingletons();
+            Log("patch inactive for now; hook stays installed and will keep retrying");
         }
 
         while (g_started.load())
@@ -488,7 +503,9 @@ namespace
                 DWORD now = GetTickCount();
                 if (now - lastRetry >= 5000) {
                     lastRetry = now;
-                    TryFindVolumeRenderer();
+                    if (TryFindVolumeRenderer()) {
+                        Log("found sVolumeRenderer on retry!");
+                    }
                 }
                 continue;
             }
