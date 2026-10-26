@@ -421,6 +421,19 @@ namespace
         fclose(f);
     }
 
+    // 把 __try 独立出来，避免和 std::filesystem::path 等析构对象混用导致 C2712
+    bool TryInstallHookSeh()
+    {
+        __try
+        {
+            return InstallCSystemCtorHook();
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
     void Worker(HMODULE module)
     {
         wchar_t buf[MAX_PATH] = {};
@@ -441,12 +454,10 @@ namespace
         // 【关键改动】废弃 Sleep(300)，死死卡在这里等游戏模块加载完，并立刻注入
         Log("Trying to install cSystem::Ctor hook immediately...");
         while (!g_started.load()) {
-            __try {
-                if (InstallCSystemCtorHook()) {
-                    Log("cSystem::Ctor hooked early!");
-                    break;
-                }
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            if (TryInstallHookSeh()) {
+                Log("cSystem::Ctor hooked early!");
+                break;
+            }
             Sleep(10);
         }
 
