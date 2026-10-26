@@ -1,0 +1,54 @@
+name: 构建 MHW DisableVolumeFog 模组
+
+on:
+  # 纯手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（作为 Release 的 tag，例如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: 检出仓库
+      uses: actions/checkout@v4
+
+    - name: 配置 MSVC 编译环境
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: 编译 DLL
+      shell: cmd
+      run: |
+        if not exist out mkdir out
+        cl /nologo /LD /O2 /EHsc /W3 /MT MHW_DisableVolumeFog/dllmain.cpp /Fo:out\ /Fe:out\MHW_DisableVolumeFog.dll /link /DEBUG:NONE
+
+    - name: 准备发布文件
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force output | Out-Null
+        Copy-Item out\MHW_DisableVolumeFog.dll output\ -Force
+
+    - name: 上传构建产物（Artifact）
+      uses: actions/upload-artifact@v4
+      with:
+        name: MHW_DisableVolumeFog-DLL
+        path: output/MHW_DisableVolumeFog.dll
+
+    - name: 自动创建 Release 并上传 DLL
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.inputs.version }}
+        name: MHW ParallelContacts ${{ github.event.inputs.version }}
+        files: output/MHW_DisableVolumeFog.dll
+        generate_release_notes: true
+        target_commitish: ${{ github.sha }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
